@@ -8,18 +8,22 @@ body {
 :root {
   --background: #061321;
   --foreground: #f4f8ff;
+  --font-sans:
+    "Segoe UI", "Aptos", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono:
+    "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
 }
 
 body {
   color: var(--foreground);
-  font-family: var(--font-geist-sans), sans-serif;
+  font-family: var(--font-sans);
   background:
     radial-gradient(1100px 720px at 8% -12%, rgba(34, 197, 94, 0.18), transparent 56%),
     radial-gradient(940px 620px at 105% 0%, rgba(56, 189, 248, 0.2), transparent 50%),

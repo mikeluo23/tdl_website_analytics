@@ -1,19 +1,8 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import { apiGet } from "@/lib/api";
 import type { DivisionOption } from "@/lib/divisions";
 import "./globals.css";
 import Nav from "./components/Nav";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export const metadata: Metadata = {
   title: "TDL Advanced Stats",
@@ -35,9 +24,7 @@ export default async function RootLayout({
 
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-black text-white`}
-      >
+      <body className="antialiased bg-black text-white">
         <Nav divisions={divisions} />
         {children}
       </body>
