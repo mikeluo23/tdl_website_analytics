@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { apiGet } from "@/lib/api";
 import type { DivisionOption } from "@/lib/divisions";
 import "./globals.css";
@@ -25,7 +26,9 @@ export default async function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased bg-black text-white">
-        <Nav divisions={divisions} />
+        <Suspense fallback={null}>
+          <Nav divisions={divisions} />
+        </Suspense>
         {children}
       </body>
     </html>
