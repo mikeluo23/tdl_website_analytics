@@ -93,6 +93,8 @@ type ExplorerMetricKey =
   | "free_throw_share"
   | "gp";
 
+type PlayerPoolSize = 50 | 100 | 200 | 5000;
+
 const explorerMetricOptions: { key: ExplorerMetricKey; label: string }[] = [
   { key: "ppg", label: "PPG" },
   { key: "rpg", label: "RPG" },
@@ -143,6 +145,7 @@ export default function LeaderboardClient() {
   const [sortKey, setSortKey] = useState<SortKey>("ppg");
   const [sortDirection, setSortDirection] = useState<"desc" | "asc">("desc");
   const [minGP, setMinGP] = useState<number>(2);
+  const [playerPoolSize, setPlayerPoolSize] = useState<PlayerPoolSize>(5000);
   const [q, setQ] = useState<string>("");
   const [xMetric, setXMetric] = useState<ExplorerMetricKey>("ppg");
   const [yMetric, setYMetric] = useState<ExplorerMetricKey>("ts");
@@ -160,13 +163,18 @@ export default function LeaderboardClient() {
   const [maxScrollLeft, setMaxScrollLeft] = useState(0);
 
   useEffect(() => {
-    apiGet<Row[]>(withQuery("/leaderboard", { division: division || undefined }))
+    apiGet<Row[]>(
+      withQuery("/leaderboard", {
+        division: division || undefined,
+        limit: String(playerPoolSize),
+      }),
+    )
       .then((data) => {
         setRows(data);
         setErr(null);
       })
       .catch((error) => setErr(String(error)));
-  }, [division]);
+  }, [division, playerPoolSize]);
 
   useEffect(() => {
     const nav = document.querySelector<HTMLElement>("[data-sticky-nav]");
@@ -529,7 +537,8 @@ export default function LeaderboardClient() {
           <div>
             <h1 className="text-3xl font-bold">Leaderboard</h1>
             <p className="mt-1 text-sm text-zinc-400">
-              {cleaned.length} players | min GP {minGP}
+              {cleaned.length} players shown | map pool{" "}
+              {playerPoolSize === 5000 ? "all" : `top ${playerPoolSize}`} | min GP {minGP}
             </p>
           </div>
 
@@ -620,6 +629,20 @@ export default function LeaderboardClient() {
               onChange={(event) => setMinGP(Math.max(0, Number(event.target.value)))}
               title="Minimum games played"
             />
+
+            <select
+              className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-white"
+              value={playerPoolSize}
+              onChange={(event) =>
+                setPlayerPoolSize(Number(event.target.value) as PlayerPoolSize)
+              }
+              title="Players loaded into leaderboard charts and table"
+            >
+              <option value={50}>Map Pool: Top 50</option>
+              <option value={100}>Map Pool: Top 100</option>
+              <option value={200}>Map Pool: Top 200</option>
+              <option value={5000}>Map Pool: All</option>
+            </select>
           </div>
         </div>
 

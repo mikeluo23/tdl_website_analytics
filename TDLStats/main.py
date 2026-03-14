@@ -922,7 +922,7 @@ def player_game_log(
 @app.get("/leaderboard")
 def leaderboard(
     sort: str = Query("pts"),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=5000),
     division: str | None = Query(None),
 ):
     division_id = normalize_division_id(division)
