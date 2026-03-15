@@ -967,9 +967,21 @@ export default function LeaderboardClient() {
 
   const columns = useMemo(
     () => [
-      { key: "player", label: "Player", align: "left", width: "18rem" },
+      {
+        key: "player",
+        label: "Player",
+        align: "left",
+        width: isCompactCharts ? "10.5rem" : "18rem",
+      },
       ...(showDivisionColumn
-        ? [{ key: "divisions", label: "Divisions", align: "left", width: "14rem" }]
+        ? [
+            {
+              key: "divisions",
+              label: "Divisions",
+              align: "left",
+              width: isCompactCharts ? "9rem" : "14rem",
+            },
+          ]
         : []),
       { key: "gp", label: "GP", align: "right", width: "5rem" },
       { key: "pts", label: mode === "totals" ? "PTS" : "PPG", align: "right", width: "6.75rem" },
@@ -990,7 +1002,7 @@ export default function LeaderboardClient() {
       { key: "tp_pct", label: "3P%", align: "right", width: "6.75rem" },
       { key: "ft_pct", label: "FT%", align: "right", width: "6.75rem" },
     ],
-    [mode, showDivisionColumn],
+    [isCompactCharts, mode, showDivisionColumn],
   );
   const tableMinWidth = useMemo(
     () => columns.reduce((total, column) => total + Number.parseFloat(column.width), 0),
@@ -2032,7 +2044,7 @@ export default function LeaderboardClient() {
                         className={`p-3 font-medium ${
                           column.align === "left" ? "text-left" : "text-right"
                         } ${
-                          index === 0
+                          index === 0 && !isCompactCharts
                             ? "sticky left-0 z-20 bg-zinc-950/98 shadow-[6px_0_16px_rgba(2,6,23,0.45)]"
                             : ""
                         }`}
@@ -2072,9 +2084,17 @@ export default function LeaderboardClient() {
                     key={row.player_id}
                     className="border-t border-zinc-800 transition hover:bg-zinc-800/40"
                   >
-                    <td className="sticky left-0 z-10 bg-slate-950/96 p-3 font-medium text-left shadow-[6px_0_16px_rgba(2,6,23,0.45)]">
+                    <td
+                      className={`p-3 font-medium text-left ${
+                        isCompactCharts
+                          ? "max-w-[10.5rem]"
+                          : "sticky left-0 z-10 bg-slate-950/96 shadow-[6px_0_16px_rgba(2,6,23,0.45)]"
+                      }`}
+                    >
                       <Link
-                        className="hover:underline"
+                        className={`block hover:underline ${
+                          isCompactCharts ? "truncate" : "truncate"
+                        }`}
                         href={withDivision(`/players/${row.player_id}`, division)}
                       >
                         {row.player_name}
