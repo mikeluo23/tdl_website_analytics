@@ -506,6 +506,15 @@ function formatAxisTick(value: number, metricKey: ScatterMetricKey | ChartMetric
   return percentLikeMetricKeys.has(metricKey) ? `${rounded}%` : rounded;
 }
 
+function readScatterPoint(event: unknown) {
+  if (!event || typeof event !== "object") return null;
+  const maybePoint = event as { xValue?: unknown; yValue?: unknown };
+  const xValue = Number(maybePoint.xValue);
+  const yValue = Number(maybePoint.yValue);
+  if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) return null;
+  return { xValue, yValue };
+}
+
 export default function LeaderboardClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -989,27 +998,29 @@ export default function LeaderboardClient() {
 
   const beginScatterDrag =
     (setDrag: (value: DragState) => void) =>
-    (event?: { xValue?: number; yValue?: number }) => {
-      if (!event || !Number.isFinite(event.xValue) || !Number.isFinite(event.yValue)) return;
+    (event?: unknown) => {
+      const point = readScatterPoint(event);
+      if (!point) return;
       setDrag({
-        x1: Number(event.xValue),
-        y1: Number(event.yValue),
-        x2: Number(event.xValue),
-        y2: Number(event.yValue),
+        x1: point.xValue,
+        y1: point.yValue,
+        x2: point.xValue,
+        y2: point.yValue,
       });
     };
 
   const updateScatterDrag =
     (setDrag: (value: DragState | ((current: DragState) => DragState)) => void) =>
-    (event?: { xValue?: number; yValue?: number }) => {
-      if (!event || !Number.isFinite(event.xValue) || !Number.isFinite(event.yValue)) return;
+    (event?: unknown) => {
+      const point = readScatterPoint(event);
+      if (!point) return;
       setDrag((current) =>
         current.x1 === null || current.y1 === null
           ? current
           : {
               ...current,
-              x2: Number(event.xValue),
-              y2: Number(event.yValue),
+              x2: point.xValue,
+              y2: point.yValue,
             },
       );
     };
