@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
+import { Analytics } from "@vercel/analytics/react";
 import { apiGet } from "@/lib/api";
 import type { DivisionOption } from "@/lib/divisions";
 import "./globals.css";
@@ -30,6 +31,7 @@ export default async function RootLayout({
           <Nav divisions={divisions} />
         </Suspense>
         {children}
+        <Analytics />
       </body>
     </html>
   );
