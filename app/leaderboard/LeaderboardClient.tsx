@@ -2,6 +2,7 @@
 
 import {
   type CSSProperties,
+  type TouchEvent,
   type WheelEvent,
   useDeferredValue,
   useEffect,
@@ -125,6 +126,14 @@ type DragState = {
   y1: number | null;
   x2: number | null;
   y2: number | null;
+};
+
+type PinchState = {
+  initialDistance: number;
+  initialXDomain: ScatterDomain;
+  initialYDomain: ScatterDomain;
+  xRatio: number;
+  yRatio: number;
 };
 
 type ScatterDomain = [number, number];
@@ -520,6 +529,17 @@ function readScatterPoint(event: unknown) {
   return { xValue, yValue };
 }
 
+function touchDistance(touchA: { clientX: number; clientY: number }, touchB: { clientX: number; clientY: number }) {
+  return Math.hypot(touchB.clientX - touchA.clientX, touchB.clientY - touchA.clientY);
+}
+
+function touchCenter(touchA: { clientX: number; clientY: number }, touchB: { clientX: number; clientY: number }) {
+  return {
+    clientX: (touchA.clientX + touchB.clientX) / 2,
+    clientY: (touchA.clientY + touchB.clientY) / 2,
+  };
+}
+
 export default function LeaderboardClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -571,6 +591,8 @@ export default function LeaderboardClient() {
   const progressLabelRef = useRef<HTMLSpanElement | null>(null);
   const dynamicScatterRef = useRef<HTMLDivElement | null>(null);
   const explorerScatterRef = useRef<HTMLDivElement | null>(null);
+  const dynamicPinchRef = useRef<PinchState | null>(null);
+  const explorerPinchRef = useRef<PinchState | null>(null);
   const activeWheelPlotRef = useRef<"dynamic" | "explorer" | null>(null);
   const syncingRef = useRef<"header" | "body" | null>(null);
   const scrollLeftRef = useRef(0);
@@ -1125,6 +1147,63 @@ export default function LeaderboardClient() {
     );
   };
 
+  const beginPinchZoom = (
+    event: TouchEvent<HTMLDivElement>,
+    container: HTMLDivElement | null,
+    zoom: ZoomState,
+    fullDomain: { xDomain: ScatterDomain; yDomain: ScatterDomain },
+    pinchRef: { current: PinchState | null },
+  ) => {
+    if (event.touches.length < 2) return;
+    const [touchA, touchB] = [event.touches[0], event.touches[1]];
+    const rect = container?.getBoundingClientRect();
+    const center = touchCenter(touchA, touchB);
+    pinchRef.current = {
+      initialDistance: Math.max(touchDistance(touchA, touchB), MIN_DOMAIN_SPAN),
+      initialXDomain: zoom.xDomain ?? fullDomain.xDomain,
+      initialYDomain: zoom.yDomain ?? fullDomain.yDomain,
+      xRatio: rect && rect.width > 0 ? (center.clientX - rect.left) / rect.width : 0.5,
+      yRatio: rect && rect.height > 0 ? 1 - (center.clientY - rect.top) / rect.height : 0.5,
+    };
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const updatePinchZoom = (
+    event: TouchEvent<HTMLDivElement>,
+    fullDomain: { xDomain: ScatterDomain; yDomain: ScatterDomain },
+    pinchRef: { current: PinchState | null },
+    setZoom: (value: ZoomState) => void,
+  ) => {
+    if (event.touches.length < 2 || !pinchRef.current) return;
+    const [touchA, touchB] = [event.touches[0], event.touches[1]];
+    const nextDistance = touchDistance(touchA, touchB);
+    const pinchState = pinchRef.current;
+    const factor = pinchState.initialDistance / Math.max(nextDistance, MIN_DOMAIN_SPAN);
+
+    setZoom({
+      xDomain: zoomDomainAroundRatio(
+        pinchState.initialXDomain,
+        fullDomain.xDomain,
+        factor,
+        pinchState.xRatio,
+      ),
+      yDomain: zoomDomainAroundRatio(
+        pinchState.initialYDomain,
+        fullDomain.yDomain,
+        factor,
+        pinchState.yRatio,
+      ),
+    });
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const endPinchZoom = (event: TouchEvent<HTMLDivElement>, pinchRef: { current: PinchState | null }) => {
+    if (event.touches.length >= 2) return;
+    pinchRef.current = null;
+  };
+
   useEffect(() => {
     const handleWindowWheel = (event: globalThis.WheelEvent) => {
       const dynamicNode = dynamicScatterRef.current;
@@ -1569,8 +1648,8 @@ export default function LeaderboardClient() {
               style={{
                 width: "100%",
                 height: isCompactCharts ? 260 : 320,
-                touchAction: "none",
-                overscrollBehavior: "contain",
+                touchAction: isCompactCharts ? "pan-y" : "none",
+                overscrollBehavior: isCompactCharts ? "auto" : "contain",
               }}
               onPointerEnter={() => {
                 activeWheelPlotRef.current = "dynamic";
@@ -1589,6 +1668,20 @@ export default function LeaderboardClient() {
                   setDynamicZoom,
                 )
               }
+              onTouchStart={(event) =>
+                beginPinchZoom(
+                  event,
+                  dynamicScatterRef.current,
+                  dynamicZoom,
+                  dynamicFullDomain,
+                  dynamicPinchRef,
+                )
+              }
+              onTouchMove={(event) =>
+                updatePinchZoom(event, dynamicFullDomain, dynamicPinchRef, setDynamicZoom)
+              }
+              onTouchEnd={(event) => endPinchZoom(event, dynamicPinchRef)}
+              onTouchCancel={(event) => endPinchZoom(event, dynamicPinchRef)}
             >
               <ResponsiveContainer>
                 <ScatterChart
@@ -1820,8 +1913,8 @@ export default function LeaderboardClient() {
                 style={{
                   width: "100%",
                   height: isCompactCharts ? 280 : 340,
-                  touchAction: "none",
-                  overscrollBehavior: "contain",
+                  touchAction: isCompactCharts ? "pan-y" : "none",
+                  overscrollBehavior: isCompactCharts ? "auto" : "contain",
                 }}
                 onPointerEnter={() => {
                   activeWheelPlotRef.current = "explorer";
@@ -1840,6 +1933,20 @@ export default function LeaderboardClient() {
                     setExplorerZoom,
                   )
                 }
+                onTouchStart={(event) =>
+                  beginPinchZoom(
+                    event,
+                    explorerScatterRef.current,
+                    explorerZoom,
+                    explorerFullDomain,
+                    explorerPinchRef,
+                  )
+                }
+                onTouchMove={(event) =>
+                  updatePinchZoom(event, explorerFullDomain, explorerPinchRef, setExplorerZoom)
+                }
+                onTouchEnd={(event) => endPinchZoom(event, explorerPinchRef)}
+                onTouchCancel={(event) => endPinchZoom(event, explorerPinchRef)}
               >
                 <ResponsiveContainer>
                   <ScatterChart
