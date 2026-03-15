@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { formatFixed, formatPercent } from "@/lib/stats";
-import { withDivision } from "@/lib/divisions";
+import { withStatsFilters } from "@/lib/divisions";
 
 type Team = {
   team_id: number;
@@ -37,9 +37,13 @@ function num(value: number | string | undefined) {
 export default function TeamStandingsTable({
   teams,
   division,
+  year,
+  seasonTerm,
 }: {
   teams: Team[];
   division?: string;
+  year?: string;
+  seasonTerm?: string;
 }) {
   const [sortKey, setSortKey] = useState<SortKey>("wins");
   const [sortDirection, setSortDirection] = useState<"desc" | "asc">("desc");
@@ -130,7 +134,11 @@ export default function TeamStandingsTable({
               >
                 <td className="p-3 font-medium">
                   <Link
-                    href={withDivision(`/teams/${team.team_id}`, division)}
+                    href={withStatsFilters(`/teams/${team.team_id}`, {
+                      division,
+                      year,
+                      seasonTerm,
+                    })}
                     className="hover:underline"
                   >
                     {team.team_name}

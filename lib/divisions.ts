@@ -32,3 +32,18 @@ export function withQuery(
 export function withDivision(path: string, division?: string | null) {
   return withQuery(path, { division: normalizeDivision(division) || undefined });
 }
+
+export function withStatsFilters(
+  path: string,
+  filters: {
+    division?: string | null;
+    year?: string | null;
+    seasonTerm?: string | null;
+  },
+) {
+  return withQuery(path, {
+    division: normalizeDivision(filters.division) || undefined,
+    year: filters.year?.trim() || undefined,
+    season_term: filters.seasonTerm?.trim() || undefined,
+  });
+}

@@ -1,5 +1,6 @@
 "use client";
 
+import { startTransition } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -43,11 +44,12 @@ export default function Nav({ divisions }: { divisions: DivisionOption[] }) {
       className="sticky top-0 z-50 border-b border-slate-700 bg-slate-900/80 backdrop-blur"
     >
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-6 py-3 sm:px-8">
-        <Link href={navHref("/")} className="mr-2 font-semibold tracking-tight text-white">
+        <Link prefetch href={navHref("/")} className="mr-2 font-semibold tracking-tight text-white">
           TDL Advanced Stats
         </Link>
 
         <Link
+          prefetch
           href={navHref("/players")}
           className={`${navLinkBase} ${isActive("/players") ? navLinkActive : navLinkInactive}`}
         >
@@ -55,6 +57,7 @@ export default function Nav({ divisions }: { divisions: DivisionOption[] }) {
         </Link>
 
         <Link
+          prefetch
           href={navHref("/leaderboard")}
           className={`${navLinkBase} ${isActive("/leaderboard") ? navLinkActive : navLinkInactive}`}
         >
@@ -62,6 +65,7 @@ export default function Nav({ divisions }: { divisions: DivisionOption[] }) {
         </Link>
 
         <Link
+          prefetch
           href={navHref("/games")}
           className={`${navLinkBase} ${isActive("/games") ? navLinkActive : navLinkInactive}`}
         >
@@ -69,6 +73,7 @@ export default function Nav({ divisions }: { divisions: DivisionOption[] }) {
         </Link>
 
         <Link
+          prefetch
           href={navHref("/teams")}
           className={`${navLinkBase} ${isActive("/teams") ? navLinkActive : navLinkInactive}`}
         >
@@ -98,12 +103,15 @@ export default function Nav({ divisions }: { divisions: DivisionOption[] }) {
             placeholder="Search players..."
             onKeyDown={(e) => {
               if (e.key === "Enter") {
+                e.preventDefault();
                 const q = (e.currentTarget.value || "").trim();
                 const url = withQuery("/players", {
                   q: q || undefined,
                   division: division || undefined,
                 });
-                window.location.href = url;
+                startTransition(() => {
+                  router.push(url);
+                });
               }
             }}
           />

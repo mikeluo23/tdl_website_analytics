@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { apiGet } from "@/lib/api";
 import AnalyticsMethodology from "@/app/components/AnalyticsMethodology";
-import { normalizeDivision, withDivision, withQuery } from "@/lib/divisions";
+import { normalizeDivision, withQuery, withStatsFilters } from "@/lib/divisions";
 import {
   calcGameScore,
   calcMedian,
@@ -24,6 +24,12 @@ type Player = {
   player_name: string;
   division_count?: number;
   division_labels?: string[];
+};
+
+type SeasonOptions = {
+  years: string[];
+  season_terms: string[];
+  year_terms: { year: string; season_terms: string[] }[];
 };
 
 type PlayerGame = {
@@ -86,10 +92,10 @@ export default async function PlayerDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ division?: string }>;
+  searchParams: Promise<{ division?: string; year?: string; season_term?: string }>;
 }) {
   const { id } = await params;
-  const { division } = await searchParams;
+  const { division, year = "", season_term: seasonTerm = "" } = await searchParams;
   const playerId = Number(id);
   const divisionId = normalizeDivision(division);
 
@@ -101,7 +107,10 @@ export default async function PlayerDetailPage({
           <p className="mb-6 text-zinc-400">
             Got: <code className="text-red-300">{id}</code>
           </p>
-          <Link href={withDivision("/players", divisionId)} className="text-zinc-300 hover:text-white">
+          <Link
+            href={withStatsFilters("/players", { division: divisionId, year, seasonTerm })}
+            className="text-zinc-300 hover:text-white"
+          >
             {"<- Back to Players"}
           </Link>
         </div>
@@ -109,19 +118,25 @@ export default async function PlayerDetailPage({
     );
   }
 
-  const [games, players] = await Promise.all([
+  const [games, player, seasonOptions] = await Promise.all([
     apiGet<PlayerGame[]>(
-      withQuery(`/players/${playerId}/games`, { division: divisionId || undefined }),
+      withQuery(`/players/${playerId}/games`, {
+        division: divisionId || undefined,
+        year: year || undefined,
+        season_term: seasonTerm || undefined,
+        limit: 500,
+      }),
     ),
-    apiGet<Player[]>(withQuery("/players", { division: divisionId || undefined })),
+    apiGet<Player>(`/players/${playerId}`),
+    apiGet<SeasonOptions>(withQuery("/season-options", { division: divisionId || undefined })),
   ]);
 
-  const playerName =
-    players.find((player) => player.player_id === playerId)?.player_name ??
-    `Player #${playerId}`;
-  const player = players.find((entry) => entry.player_id === playerId);
+  const playerName = player.player_name ?? `Player #${playerId}`;
   const showDivisionColumn =
     !divisionId && new Set(games.map((game) => game.division_label).filter(Boolean)).size > 1;
+  const seasonTermsForYear =
+    seasonOptions.year_terms.find((option) => option.year === year)?.season_terms ??
+    seasonOptions.season_terms;
 
   const totals = games.reduce(
     (acc, game) => {
@@ -224,9 +239,52 @@ export default async function PlayerDetailPage({
                 : ""}
             </p>
           </div>
-          <Link href={withDivision("/players", divisionId)} className="text-zinc-400 hover:text-white">
-            {"<- Back to Players"}
-          </Link>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <form className="flex flex-wrap items-center gap-2" action={`/players/${playerId}`} method="get">
+              {divisionId ? <input type="hidden" name="division" value={divisionId} /> : null}
+              <select
+                name="year"
+                defaultValue={year}
+                className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-white"
+              >
+                <option value="">All Years</option>
+                {seasonOptions.years.map((optionYear) => (
+                  <option key={optionYear} value={optionYear}>
+                    Year: {optionYear}
+                  </option>
+                ))}
+              </select>
+              <select
+                name="season_term"
+                defaultValue={seasonTerm}
+                className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-white"
+              >
+                <option value="">All Seasons</option>
+                {seasonTermsForYear.map((term) => (
+                  <option key={term} value={term}>
+                    Season: {term}
+                  </option>
+                ))}
+              </select>
+              <button className="rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200">
+                Apply
+              </button>
+              {year || seasonTerm ? (
+                <Link
+                  href={withStatsFilters(`/players/${playerId}`, { division: divisionId })}
+                  className="text-sm text-zinc-400 hover:text-white"
+                >
+                  Clear
+                </Link>
+              ) : null}
+            </form>
+            <Link
+              href={withStatsFilters("/players", { division: divisionId, year, seasonTerm })}
+              className="text-zinc-400 hover:text-white"
+            >
+              {"<- Back to Players"}
+            </Link>
+          </div>
         </div>
 
         <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
@@ -420,7 +478,11 @@ export default async function PlayerDetailPage({
                         <td className="p-3 whitespace-nowrap">
                           <Link
                             className="text-blue-400 hover:underline"
-                            href={withDivision(`/games/${game.game_id}`, divisionId)}
+                            href={withStatsFilters(`/games/${game.game_id}`, {
+                              division: divisionId,
+                              year,
+                              seasonTerm,
+                            })}
                           >
                             Box Score
                           </Link>

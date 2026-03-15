@@ -20,9 +20,9 @@ divisions:
     label: "3rd Division Mondays"
     short_label: "D3 Mondays"
     calendar_url: "https://tdlbasketball.com/calendar/3rd-division-mondays/"
-    standings_url: ""
+    standings_url: "https://tdlbasketball.com/table/standings-3rd-division-mondays/"
     teams_page_url: ""
-    leaders_url: ""
+    leaders_url: "https://tdlbasketball.com/player-stats-3rd-division-mondays/"
     active: true
     notes:
       - "Current production division."

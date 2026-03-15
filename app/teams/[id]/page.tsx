@@ -2,7 +2,7 @@ import Link from "next/link";
 import AnalyticsMethodology from "@/app/components/AnalyticsMethodology";
 import TeamAnalytics from "@/app/components/TeamAnalytics";
 import { apiGet } from "@/lib/api";
-import { normalizeDivision, withDivision } from "@/lib/divisions";
+import { normalizeDivision, withQuery, withStatsFilters } from "@/lib/divisions";
 import {
   calcGameScore,
   calcEfgPercent,
@@ -87,6 +87,12 @@ type TeamSummary = {
   recent_games: RecentGame[];
 };
 
+type SeasonOptions = {
+  years: string[];
+  season_terms: string[];
+  year_terms: { year: string; season_terms: string[] }[];
+};
+
 function perGame(total: number, gamesPlayed: number) {
   return formatFixed(total / (gamesPlayed || 1));
 }
@@ -96,10 +102,10 @@ export default async function TeamPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ division?: string }>;
+  searchParams: Promise<{ division?: string; year?: string; season_term?: string }>;
 }) {
   const { id } = await params;
-  const { division } = await searchParams;
+  const { division, year = "", season_term: seasonTerm = "" } = await searchParams;
   const teamId = Number(id);
   const divisionId = normalizeDivision(division);
 
@@ -108,7 +114,10 @@ export default async function TeamPage({
       <main className="min-h-screen p-8">
         <div className="mx-auto max-w-4xl">
           <h1 className="mb-4 text-2xl font-bold">Invalid team id</h1>
-          <Link href={withDivision("/teams", divisionId)} className="text-zinc-300 hover:text-white">
+          <Link
+            href={withStatsFilters("/teams", { division: divisionId, year, seasonTerm })}
+            className="text-zinc-300 hover:text-white"
+          >
             {"<- Back to Teams"}
           </Link>
         </div>
@@ -116,7 +125,19 @@ export default async function TeamPage({
     );
   }
 
-  const summary = await apiGet<TeamSummary>(`/teams/${teamId}/summary`);
+  const [summary, seasonOptions] = await Promise.all([
+    apiGet<TeamSummary>(
+      withQuery(`/teams/${teamId}/summary`, {
+        division: divisionId || undefined,
+        year: year || undefined,
+        season_term: seasonTerm || undefined,
+      }),
+    ),
+    apiGet<SeasonOptions>(withQuery("/season-options", { division: divisionId || undefined })),
+  ]);
+  const seasonTermsForYear =
+    seasonOptions.year_terms.find((option) => option.year === year)?.season_terms ??
+    seasonOptions.season_terms;
   const tsPct = calcTsPercent(summary.pts, summary.fga, summary.fta);
   const efgPct = calcEfgPercent(summary.fgm, summary.tpm, summary.fga);
   const astTo = calcRatio(summary.ast, summary.tov);
@@ -155,14 +176,59 @@ export default async function TeamPage({
               {formatPercent(summary.win_pct ?? summary.wins / (summary.games_played || 1))}
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <form className="flex flex-wrap items-center gap-2" action={`/teams/${teamId}`} method="get">
+              {divisionId ? <input type="hidden" name="division" value={divisionId} /> : null}
+              <select
+                name="year"
+                defaultValue={year}
+                className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-white"
+              >
+                <option value="">All Years</option>
+                {seasonOptions.years.map((optionYear) => (
+                  <option key={optionYear} value={optionYear}>
+                    Year: {optionYear}
+                  </option>
+                ))}
+              </select>
+              <select
+                name="season_term"
+                defaultValue={seasonTerm}
+                className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-white"
+              >
+                <option value="">All Seasons</option>
+                {seasonTermsForYear.map((term) => (
+                  <option key={term} value={term}>
+                    Season: {term}
+                  </option>
+                ))}
+              </select>
+              <button className="rounded-xl bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-zinc-200">
+                Apply
+              </button>
+              {year || seasonTerm ? (
+                <Link
+                  href={withStatsFilters(`/teams/${teamId}`, { division: divisionId })}
+                  className="text-sm text-zinc-400 hover:text-white"
+                >
+                  Clear
+                </Link>
+              ) : null}
+            </form>
             <Link
-              href={withDivision(`/teams/compare?a=${summary.team_id}`, divisionId)}
+              href={withStatsFilters(`/teams/compare?a=${summary.team_id}`, {
+                division: divisionId,
+                year,
+                seasonTerm,
+              })}
               className="rounded-xl border border-zinc-700 bg-zinc-950/60 px-4 py-2 text-sm text-white transition hover:border-zinc-500 hover:bg-zinc-900"
             >
               Compare Team
             </Link>
-            <Link href={withDivision("/teams", divisionId)} className="text-zinc-400 hover:text-white">
+            <Link
+              href={withStatsFilters("/teams", { division: divisionId, year, seasonTerm })}
+              className="text-zinc-400 hover:text-white"
+            >
               {"<- Back to Teams"}
             </Link>
           </div>
@@ -360,7 +426,11 @@ export default async function TeamPage({
                       <td className="p-3 whitespace-nowrap font-medium">
                         <Link
                           className="hover:underline"
-                          href={withDivision(`/players/${player.player_id}`, divisionId)}
+                          href={withStatsFilters(`/players/${player.player_id}`, {
+                            division: divisionId,
+                            year,
+                            seasonTerm,
+                          })}
                         >
                           {player.player_name}
                         </Link>
@@ -411,7 +481,11 @@ export default async function TeamPage({
                       </div>
                       <Link
                         className="text-blue-400 hover:underline"
-                        href={withDivision(`/games/${game.game_id}`, divisionId)}
+                        href={withStatsFilters(`/games/${game.game_id}`, {
+                          division: divisionId,
+                          year,
+                          seasonTerm,
+                        })}
                       >
                         Box Score
                       </Link>

@@ -93,6 +93,8 @@ class DivisionSpec:
     label: str
     short_label: str
     calendar_url: str
+    standings_url: str
+    leaders_url: str
     active: bool
     team_aliases: dict[str, str]
 
@@ -151,6 +153,26 @@ def game_key_from_url(url: str) -> str:
     return slug
 
 
+def coerce_int(value: str) -> int:
+    text = normalize_space(value)
+    if text in {"", "-"}:
+        return 0
+    sanitized = re.sub(r"[^0-9.\-]+", "", text)
+    if sanitized in {"", "-", ".", "-."}:
+        return 0
+    return int(float(sanitized))
+
+
+def coerce_pct(value: str) -> float:
+    text = normalize_space(value)
+    if text in {"", "-"}:
+        return 0.0
+    sanitized = re.sub(r"[^0-9.\-]+", "", text)
+    if sanitized in {"", "-", ".", "-."}:
+        return 0.0
+    return float(sanitized)
+
+
 def csv_path(name: str) -> Path:
     return ROOT_DIR / name
 
@@ -197,6 +219,8 @@ def load_division_specs(config_path: Path, requested_ids: set[str] | None = None
                 label=normalize_space(str(division.get("label", division_id))),
                 short_label=normalize_space(str(division.get("short_label", division_id))),
                 calendar_url=normalize_space(str(division.get("calendar_url", ""))),
+                standings_url=normalize_space(str(division.get("standings_url", ""))),
+                leaders_url=normalize_space(str(division.get("leaders_url", ""))),
                 active=True,
                 team_aliases=team_aliases,
             )

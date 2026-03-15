@@ -1,13 +1,16 @@
 import csv
 import os
 from collections import defaultdict
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
 import pymysql
+import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg.rows import dict_row
 
 ROOT_DIR = Path(__file__).resolve().parent
 load_dotenv(ROOT_DIR / ".env")
@@ -20,10 +23,27 @@ DEFAULT_ALLOWED_ORIGINS = [
 ]
 
 DATA_SOURCE = os.getenv("DATA_SOURCE", "csv").strip().lower()
+ENABLE_HISTORICAL_DATA = os.getenv("ENABLE_HISTORICAL_DATA", "0").strip().lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+}
+POSTGRES_ANALYTICS = os.getenv("POSTGRES_ANALYTICS", "0").strip().lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+}
 CSV_FILES = [
     ROOT_DIR / "games.csv",
     ROOT_DIR / "player_game_stats.csv",
     ROOT_DIR / "team_game_totals.csv",
+]
+HISTORICAL_CSV_FILES = [
+    ROOT_DIR / "historical_games.csv",
+    ROOT_DIR / "historical_player_game_stats.csv",
+    ROOT_DIR / "historical_team_game_totals.csv",
 ]
 
 app = FastAPI(title="TDL Advanced Stats API")
@@ -56,6 +76,17 @@ def get_conn():
     )
 
 
+def get_postgres_conn():
+    return psycopg.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        row_factory=dict_row,
+    )
+
+
 def normalize_space(value):
     return " ".join(str(value or "").replace("\xa0", " ").split())
 
@@ -82,7 +113,10 @@ def to_float(value):
 
 
 def csv_snapshot_key():
-    return tuple(path.stat().st_mtime_ns if path.exists() else 0 for path in CSV_FILES)
+    tracked_files = list(CSV_FILES)
+    if ENABLE_HISTORICAL_DATA:
+        tracked_files.extend(HISTORICAL_CSV_FILES)
+    return tuple(path.stat().st_mtime_ns if path.exists() else 0 for path in tracked_files)
 
 
 def read_csv_rows(path: Path):
@@ -92,11 +126,129 @@ def read_csv_rows(path: Path):
         return list(csv.DictReader(handle))
 
 
+def read_optional_csv_rows(path: Path):
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def season_parts(value):
+    text = normalize_space(value)
+    compact = text.replace(" ", "")
+    if len(compact) >= 5 and compact[:4].isdigit():
+        return compact, compact[:4], compact[4:].upper()
+    return text, "", ""
+
+
 @lru_cache(maxsize=4)
 def _load_csv_store(_snapshot_key):
     games_rows = read_csv_rows(ROOT_DIR / "games.csv")
     player_rows_raw = read_csv_rows(ROOT_DIR / "player_game_stats.csv")
     team_totals_raw = read_csv_rows(ROOT_DIR / "team_game_totals.csv")
+    if ENABLE_HISTORICAL_DATA:
+        historical_games_rows = read_optional_csv_rows(ROOT_DIR / "historical_games.csv")
+        historical_player_rows = read_optional_csv_rows(
+            ROOT_DIR / "historical_player_game_stats.csv"
+        )
+        historical_team_totals = read_optional_csv_rows(
+            ROOT_DIR / "historical_team_game_totals.csv"
+        )
+    else:
+        historical_games_rows = []
+        historical_player_rows = []
+        historical_team_totals = []
+
+    seen_game_urls = {
+        normalize_space(row.get("game_url")) for row in games_rows if normalize_space(row.get("game_url"))
+    }
+    historical_game_urls = set()
+    allowed_historical_game_urls = set()
+    normalized_historical_games = []
+    for row in historical_games_rows:
+        game_url = normalize_space(row.get("game_url"))
+        if not game_url or game_url in seen_game_urls or game_url in historical_game_urls:
+            continue
+        historical_game_urls.add(game_url)
+        allowed_historical_game_urls.add(game_url)
+        normalized_historical_games.append(
+            {
+                "division_id": normalize_space(row.get("division_id")),
+                "division_label": normalize_space(row.get("division_label")),
+                "game_url": game_url,
+                "game_id": normalize_space(row.get("game_id")),
+                "title": normalize_space(row.get("title")),
+                "game_date": normalize_space(row.get("game_date")),
+                "season": normalize_space(row.get("season_code") or row.get("season")),
+                "season_year": normalize_space(row.get("season_year")),
+                "season_term": normalize_space(row.get("season_term")).upper(),
+                "venue": normalize_space(row.get("venue")),
+                "league": normalize_space(row.get("league")),
+            }
+        )
+    games_rows.extend(normalized_historical_games)
+
+    player_rows_raw.extend(
+        [
+            {
+                "division_id": normalize_space(row.get("division_id")),
+                "division_label": normalize_space(row.get("division_label")),
+                "player_name": normalize_space(row.get("player_name")),
+                "pts": normalize_space(row.get("pts")),
+                "reb": normalize_space(row.get("reb")),
+                "ast": normalize_space(row.get("ast")),
+                "stl": normalize_space(row.get("stl")),
+                "blk": normalize_space(row.get("blk")),
+                "fgm": normalize_space(row.get("fgm")),
+                "fga": normalize_space(row.get("fga")),
+                "fg%": normalize_space(row.get("fg%")),
+                "3pm": normalize_space(row.get("3pm")),
+                "3pa": normalize_space(row.get("3pa")),
+                "3p%": normalize_space(row.get("3p%")),
+                "ftm": normalize_space(row.get("ftm")),
+                "fta": normalize_space(row.get("fta")),
+                "ft%": normalize_space(row.get("ft%")),
+                "tov": normalize_space(row.get("tov")),
+                "pf": normalize_space(row.get("pf")),
+                "game_id": normalize_space(row.get("game_id")),
+                "game_url": normalize_space(row.get("game_url")),
+                "table_index": normalize_space(row.get("table_index")),
+                "team_name": clean_team_name(row.get("team_name")),
+            }
+            for row in historical_player_rows
+            if normalize_space(row.get("game_url")) in allowed_historical_game_urls
+        ]
+    )
+    team_totals_raw.extend(
+        [
+            {
+                "division_id": normalize_space(row.get("division_id")),
+                "division_label": normalize_space(row.get("division_label")),
+                "game_id": normalize_space(row.get("game_id")),
+                "game_url": normalize_space(row.get("game_url")),
+                "table_index": normalize_space(row.get("table_index")),
+                "team_name": clean_team_name(row.get("team_name")),
+                "pts": normalize_space(row.get("pts")),
+                "reb": normalize_space(row.get("reb")),
+                "ast": normalize_space(row.get("ast")),
+                "stl": normalize_space(row.get("stl")),
+                "blk": normalize_space(row.get("blk")),
+                "fgm": normalize_space(row.get("fgm")),
+                "fga": normalize_space(row.get("fga")),
+                "fg%": normalize_space(row.get("fg%")),
+                "3pm": normalize_space(row.get("3pm")),
+                "3pa": normalize_space(row.get("3pa")),
+                "3p%": normalize_space(row.get("3p%")),
+                "ftm": normalize_space(row.get("ftm")),
+                "fta": normalize_space(row.get("fta")),
+                "ft%": normalize_space(row.get("ft%")),
+                "tov": normalize_space(row.get("tov")),
+                "pf": normalize_space(row.get("pf")),
+            }
+            for row in historical_team_totals
+            if normalize_space(row.get("game_url")) in allowed_historical_game_urls
+        ]
+    )
 
     team_totals_by_game = defaultdict(list)
     for row in team_totals_raw:
@@ -142,9 +294,15 @@ def _load_csv_store(_snapshot_key):
             "title": normalize_space(row.get("title")),
             "game_date": normalize_space(row.get("game_date")),
             "season": normalize_space(row.get("season")),
+            "season_year": normalize_space(row.get("season_year")),
+            "season_term": normalize_space(row.get("season_term")).upper(),
             "venue": normalize_space(row.get("venue")),
             "league": normalize_space(row.get("league")),
         }
+        if not game_meta_by_key[game_key]["season_year"] and game_meta_by_key[game_key]["season"]:
+            _, season_year, season_term = season_parts(game_meta_by_key[game_key]["season"])
+            game_meta_by_key[game_key]["season_year"] = season_year
+            game_meta_by_key[game_key]["season_term"] = season_term
 
     for row in player_rows_raw:
         game_key = normalize_space(row.get("game_id"))
@@ -158,6 +316,8 @@ def _load_csv_store(_snapshot_key):
                 "title": game_key.replace("-", " "),
                 "game_date": "",
                 "season": "",
+                "season_year": "",
+                "season_term": "",
                 "venue": "",
                 "league": "",
             }
@@ -206,6 +366,8 @@ def _load_csv_store(_snapshot_key):
                 "team2_name": team2_name,
                 "team2_pts": team2_pts,
                 "season": meta["season"],
+                "season_year": meta["season_year"],
+                "season_term": meta["season_term"],
                 "venue": meta["venue"],
                 "league": meta["league"],
             }
@@ -224,6 +386,9 @@ def _load_csv_store(_snapshot_key):
                 "division_label": game_meta_by_key[game_key]["division_label"],
                 "game_url": normalize_space(row.get("game_url")),
                 "game_date": game_meta_by_key[game_key]["game_date"],
+                "season": game_meta_by_key[game_key]["season"],
+                "season_year": game_meta_by_key[game_key]["season_year"],
+                "season_term": game_meta_by_key[game_key]["season_term"],
                 "player_id": player_id_by_name[player_name],
                 "player_name": player_name,
                 "team_id": team_id_by_key[(game_meta_by_key[game_key]["division_id"], team_name)],
@@ -281,6 +446,9 @@ def _load_csv_store(_snapshot_key):
                 "game_id_int": game_id_by_key.get(row["game_key"]),
                 "team_id": team_id_by_key.get((row["division_id"], row["team_name"])),
                 "game_date": game_meta_by_key[row["game_key"]]["game_date"],
+                "season": game_meta_by_key[row["game_key"]]["season"],
+                "season_year": game_meta_by_key[row["game_key"]]["season_year"],
+                "season_term": game_meta_by_key[row["game_key"]]["season_term"],
             }
             for totals in team_totals_by_game.values()
             for row in totals
@@ -296,6 +464,131 @@ def csv_enabled():
     return DATA_SOURCE != "db"
 
 
+def postgres_analytics_enabled():
+    return POSTGRES_ANALYTICS
+
+
+@lru_cache(maxsize=8)
+def fetch_postgres_divisions():
+    sql = """
+    WITH game_counts AS (
+      SELECT division_id, MIN(division_label) AS division_label, COUNT(*) AS games
+      FROM games
+      GROUP BY division_id
+    ),
+    team_counts AS (
+      SELECT division_id, COUNT(DISTINCT team_id) AS teams
+      FROM teams
+      GROUP BY division_id
+    ),
+    player_counts AS (
+      SELECT division_id, COUNT(DISTINCT player_id) AS players
+      FROM player_game_stats
+      GROUP BY division_id
+    )
+    SELECT
+      gc.division_id,
+      gc.division_label,
+      gc.games,
+      COALESCE(tc.teams, 0) AS teams,
+      COALESCE(pc.players, 0) AS players
+    FROM game_counts gc
+    LEFT JOIN team_counts tc ON tc.division_id = gc.division_id
+    LEFT JOIN player_counts pc ON pc.division_id = gc.division_id
+    ORDER BY gc.division_label
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        return cur.fetchall()
+
+
+@lru_cache(maxsize=32)
+def fetch_postgres_season_options(division_id=""):
+    sql = """
+    SELECT DISTINCT season_year, season_term
+    FROM games
+    WHERE (%s = '' OR division_id = %s)
+      AND COALESCE(season_year, '') <> ''
+      AND COALESCE(season_term, '') <> ''
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (division_id, division_id))
+        rows = cur.fetchall()
+
+    years = {normalize_year(row.get("season_year")) for row in rows if row.get("season_year")}
+    season_terms = {
+        normalize_season_term(row.get("season_term"))
+        for row in rows
+        if row.get("season_term")
+    }
+    terms_by_year = defaultdict(set)
+    for row in rows:
+        year = normalize_year(row.get("season_year"))
+        season_term_value = normalize_season_term(row.get("season_term"))
+        if year and season_term_value:
+            terms_by_year[year].add(season_term_value)
+
+    sorted_years = sorted(years, reverse=True)
+    sorted_terms = sorted(season_terms, key=season_term_sort_key)
+    return {
+        "years": sorted_years,
+        "season_terms": sorted_terms,
+        "year_terms": [
+            {
+                "year": year,
+                "season_terms": sorted(terms_by_year.get(year, set()), key=season_term_sort_key),
+            }
+            for year in sorted_years
+        ],
+    }
+
+
+@lru_cache(maxsize=256)
+def fetch_postgres_player_identity(player_id: int):
+    sql = """
+    SELECT
+      p.player_id,
+      p.player_name,
+      COUNT(DISTINCT pgs.division_id) AS division_count,
+      ARRAY_AGG(DISTINCT pgs.division_id ORDER BY pgs.division_id) AS division_ids,
+      ARRAY_AGG(DISTINCT pgs.division_label ORDER BY pgs.division_label) AS division_labels
+    FROM players p
+    JOIN player_game_stats pgs ON pgs.player_id = p.player_id
+    WHERE p.player_id = %s
+    GROUP BY p.player_id, p.player_name
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (player_id,))
+        return cur.fetchone()
+
+
+@lru_cache(maxsize=512)
+def fetch_postgres_game_summary(game_id: int):
+    sql = """
+    SELECT
+      g.game_id,
+      g.game_key,
+      g.division_id,
+      g.division_label,
+      g.game_url,
+      COALESCE(TO_CHAR(g.game_date, 'FMMonth FMDD, YYYY'), '') AS game_date,
+      g.team1_name,
+      g.team1_pts,
+      g.team2_name,
+      g.team2_pts,
+      g.season,
+      g.season_year,
+      g.season_term,
+      g.venue,
+      g.league
+    FROM games g
+    WHERE g.game_id = %s
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (game_id,))
+        return cur.fetchone()
+
+
 def normalize_division_id(value):
     return normalize_space(value)
 
@@ -304,6 +597,547 @@ def matches_division(row, division_id):
     if not division_id:
         return True
     return normalize_division_id(row.get("division_id")) == division_id
+
+
+def normalize_year(value):
+    return normalize_space(value)
+
+
+def normalize_season_term(value):
+    return normalize_space(value).upper()
+
+
+def matches_year(row, year):
+    if not year:
+        return True
+    return normalize_year(row.get("season_year")) == year
+
+
+def matches_season_term(row, season_term):
+    if not season_term:
+        return True
+    return normalize_season_term(row.get("season_term")) == season_term
+
+
+def matches_filters(row, division_id, year, season_term):
+    return (
+        matches_division(row, division_id)
+        and matches_year(row, year)
+        and matches_season_term(row, season_term)
+    )
+
+
+def season_term_sort_key(term):
+    order = {"W": 0, "SP": 1, "S": 1, "SU": 2, "SUMMER": 2, "F": 3}
+    normalized = normalize_season_term(term)
+    return (order.get(normalized, 99), normalized)
+
+
+def parse_game_date(value):
+    text = normalize_space(value)
+    if not text:
+        return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def game_date_sort_value(value):
+    parsed = parse_game_date(value)
+    return parsed.toordinal() if parsed else -1
+
+
+def season_sort_value(row):
+    year = normalize_year(row.get("season_year"))
+    try:
+        year_value = int(year)
+    except (TypeError, ValueError):
+        year_value = 0
+
+    term_order, normalized_term = season_term_sort_key(row.get("season_term"))
+    return (year_value, term_order, normalized_term)
+
+
+def sort_games(rows, sort_by):
+    if sort_by == "date_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                game_date_sort_value(row.get("game_date")),
+                season_sort_value(row),
+                normalize_space(row.get("division_label")),
+                row.get("game_id", 0),
+            ),
+        )
+    if sort_by == "season_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                season_sort_value(row),
+                game_date_sort_value(row.get("game_date")),
+                normalize_space(row.get("division_label")),
+                row.get("game_id", 0),
+            ),
+            reverse=True,
+        )
+    if sort_by == "season_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                season_sort_value(row),
+                game_date_sort_value(row.get("game_date")),
+                normalize_space(row.get("division_label")),
+                row.get("game_id", 0),
+            ),
+        )
+    if sort_by == "division_asc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                normalize_space(row.get("division_label")),
+                season_sort_value(row),
+                game_date_sort_value(row.get("game_date")),
+                row.get("game_id", 0),
+            ),
+        )
+    if sort_by == "division_desc":
+        return sorted(
+            rows,
+            key=lambda row: (
+                normalize_space(row.get("division_label")),
+                season_sort_value(row),
+                game_date_sort_value(row.get("game_date")),
+                row.get("game_id", 0),
+            ),
+            reverse=True,
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            game_date_sort_value(row.get("game_date")),
+            season_sort_value(row),
+            normalize_space(row.get("division_label")),
+            row.get("game_id", 0),
+        ),
+        reverse=True,
+    )
+
+
+def postgres_filter_sql(alias):
+    return f"""
+        (%s = '' OR {alias}.division_id = %s)
+        AND (%s = '' OR COALESCE({alias}.season_year, '') = %s)
+        AND (%s = '' OR COALESCE({alias}.season_term, '') = %s)
+    """
+
+
+def postgres_season_order_sql(alias):
+    return f"""
+        COALESCE(NULLIF({alias}.season_year, ''), '0')::int,
+        CASE COALESCE({alias}.season_term, '')
+            WHEN 'W' THEN 0
+            WHEN 'SP' THEN 1
+            WHEN 'S' THEN 1
+            WHEN 'SU' THEN 2
+            WHEN 'SUMMER' THEN 2
+            WHEN 'F' THEN 3
+            ELSE 99
+        END,
+        COALESCE({alias}.season_term, '')
+    """
+
+
+def postgres_game_order_clause(sort_by, alias="g"):
+    season_order = postgres_season_order_sql(alias)
+    mapping = {
+        "date_desc": f"{alias}.game_date DESC NULLS LAST, {season_order} DESC, {alias}.game_id DESC",
+        "date_asc": f"{alias}.game_date ASC NULLS LAST, {season_order} ASC, {alias}.game_id ASC",
+        "season_desc": f"{season_order} DESC, {alias}.game_date DESC NULLS LAST, {alias}.game_id DESC",
+        "season_asc": f"{season_order} ASC, {alias}.game_date ASC NULLS LAST, {alias}.game_id ASC",
+        "division_asc": f"{alias}.division_label ASC, {season_order} DESC, {alias}.game_date DESC NULLS LAST, {alias}.game_id DESC",
+        "division_desc": f"{alias}.division_label DESC, {season_order} DESC, {alias}.game_date DESC NULLS LAST, {alias}.game_id DESC",
+    }
+    return mapping[sort_by]
+
+
+@lru_cache(maxsize=64)
+def fetch_postgres_team_analytics(division_id="", season_year="", season_term=""):
+    sql = f"""
+    WITH filtered_games AS (
+      SELECT *
+      FROM games g
+      WHERE {postgres_filter_sql('g')}
+        AND g.team1_id IS NOT NULL
+        AND g.team2_id IS NOT NULL
+    ),
+    pairings AS (
+      SELECT
+        g.game_id,
+        g.division_id,
+        g.division_label,
+        g.team1_id AS team_id,
+        g.team1_name AS team_name,
+        g.team1_pts AS points_for,
+        g.team2_id AS opponent_id,
+        g.team2_pts AS points_against
+      FROM filtered_games g
+      UNION ALL
+      SELECT
+        g.game_id,
+        g.division_id,
+        g.division_label,
+        g.team2_id AS team_id,
+        g.team2_name AS team_name,
+        g.team2_pts AS points_for,
+        g.team1_id AS opponent_id,
+        g.team1_pts AS points_against
+      FROM filtered_games g
+    ),
+    team_base AS (
+      SELECT
+        p.team_id,
+        MIN(p.team_name) AS team_name,
+        MIN(p.division_id) AS division_id,
+        MIN(p.division_label) AS division_label,
+        COUNT(*) AS games_played,
+        SUM(CASE WHEN p.points_for > p.points_against THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN p.points_for < p.points_against THEN 1 ELSE 0 END) AS losses,
+        SUM(CASE WHEN p.points_for = p.points_against THEN 1 ELSE 0 END) AS ties,
+        AVG(p.points_for::float8) AS offensive_rating_raw,
+        AVG(p.points_against::float8) AS defensive_rating_raw,
+        AVG((p.points_for - p.points_against)::float8) AS net_rating_raw,
+        AVG((CASE WHEN p.points_for > p.points_against THEN 1 ELSE 0 END)::float8) AS win_pct_raw
+      FROM pairings p
+      GROUP BY p.team_id
+    ),
+    league_avg AS (
+      SELECT COALESCE(AVG(points_for::float8), 0) AS league_average_points
+      FROM pairings
+    ),
+    opponent_stats AS (
+      SELECT
+        p.team_id,
+        COALESCE(AVG(tb.win_pct_raw), 0) AS opponent_win_pct,
+        COALESCE(AVG(tb.net_rating_raw), 0) AS strength_of_schedule,
+        COALESCE(AVG(tb.offensive_rating_raw), 0) AS average_opponent_offense,
+        COALESCE(AVG(tb.defensive_rating_raw), 0) AS average_opponent_defense
+      FROM pairings p
+      JOIN team_base tb ON tb.team_id = p.opponent_id
+      GROUP BY p.team_id
+    )
+    SELECT
+      tb.team_id,
+      tb.team_name,
+      tb.division_id,
+      tb.division_label,
+      tb.games_played,
+      tb.wins,
+      tb.losses,
+      tb.ties,
+      ROUND(tb.win_pct_raw::numeric, 4)::float8 AS win_pct,
+      ROUND(tb.offensive_rating_raw::numeric, 4)::float8 AS offensive_rating,
+      ROUND(tb.defensive_rating_raw::numeric, 4)::float8 AS defensive_rating,
+      ROUND(tb.net_rating_raw::numeric, 4)::float8 AS net_rating,
+      ROUND(os.strength_of_schedule::numeric, 4)::float8 AS strength_of_schedule,
+      ROUND(os.opponent_win_pct::numeric, 4)::float8 AS opponent_win_pct,
+      ROUND((tb.offensive_rating_raw - os.average_opponent_defense + la.league_average_points)::numeric, 4)::float8 AS adjusted_offensive_rating,
+      ROUND((tb.defensive_rating_raw - os.average_opponent_offense + la.league_average_points)::numeric, 4)::float8 AS adjusted_defensive_rating,
+      ROUND(((tb.offensive_rating_raw - os.average_opponent_defense + la.league_average_points) - (tb.defensive_rating_raw - os.average_opponent_offense + la.league_average_points))::numeric, 4)::float8 AS adjusted_net_rating
+    FROM team_base tb
+    LEFT JOIN opponent_stats os ON os.team_id = tb.team_id
+    CROSS JOIN league_avg la
+    ORDER BY tb.wins DESC, tb.losses ASC, adjusted_net_rating DESC, tb.team_name ASC
+    """
+    params = (division_id, division_id, season_year, season_year, season_term, season_term)
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+@lru_cache(maxsize=64)
+def fetch_postgres_players(division_id="", season_year="", season_term=""):
+    sql = f"""
+    SELECT
+      p.player_id,
+      p.player_name,
+      COUNT(DISTINCT pgs.division_id) AS division_count,
+      ARRAY_AGG(DISTINCT pgs.division_id ORDER BY pgs.division_id) AS division_ids,
+      ARRAY_AGG(DISTINCT pgs.division_label ORDER BY pgs.division_label) AS division_labels
+    FROM players p
+    JOIN player_game_stats pgs ON pgs.player_id = p.player_id
+    WHERE {postgres_filter_sql('pgs')}
+    GROUP BY p.player_id, p.player_name
+    ORDER BY p.player_name
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (
+                division_id,
+                division_id,
+                season_year,
+                season_year,
+                season_term,
+                season_term,
+            ),
+        )
+        return cur.fetchall()
+
+
+@lru_cache(maxsize=128)
+def fetch_postgres_games(
+    division_id="",
+    season_year="",
+    season_term="",
+    sort_by="date_desc",
+    limit=100,
+    offset=0,
+):
+    sql = f"""
+    SELECT
+      g.game_id,
+      g.game_key,
+      g.division_id,
+      g.division_label,
+      g.game_url,
+      COALESCE(TO_CHAR(g.game_date, 'FMMonth FMDD, YYYY'), '') AS game_date,
+      g.team1_id,
+      g.team1_name,
+      g.team1_pts,
+      g.team2_id,
+      g.team2_name,
+      g.team2_pts,
+      g.season,
+      g.season_year,
+      g.season_term,
+      g.venue,
+      g.league
+    FROM games g
+    WHERE {postgres_filter_sql('g')}
+    ORDER BY {postgres_game_order_clause(sort_by, 'g')}
+    LIMIT %s OFFSET %s
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (
+                division_id,
+                division_id,
+                season_year,
+                season_year,
+                season_term,
+                season_term,
+                limit,
+                offset,
+            ),
+        )
+        return cur.fetchall()
+
+
+@lru_cache(maxsize=128)
+def fetch_postgres_leaderboard(sort="pts", limit=50, division_id="", season_year="", season_term=""):
+    order_columns = {
+        "pts": "pts",
+        "reb": "reb",
+        "ast": "ast",
+        "stl": "stl",
+        "blk": "blk",
+        "tpm": "tpm",
+    }
+    if sort not in order_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort must be one of {sorted(order_columns)}",
+        )
+
+    sql = f"""
+    SELECT
+      pst.player_id,
+      pst.player_name,
+      SUM(pst.games_played) AS games_played,
+      COUNT(DISTINCT pst.division_id) AS division_count,
+      ARRAY_AGG(DISTINCT pst.division_id ORDER BY pst.division_id) AS division_ids,
+      ARRAY_AGG(DISTINCT pst.division_label ORDER BY pst.division_label) AS division_labels,
+      SUM(pst.pts) AS pts,
+      SUM(pst.reb) AS reb,
+      SUM(pst.ast) AS ast,
+      SUM(pst.stl) AS stl,
+      SUM(pst.blk) AS blk,
+      SUM(pst.tov) AS tov,
+      SUM(pst.fouls) AS fouls,
+      SUM(pst.fgm) AS fgm,
+      SUM(pst.fga) AS fga,
+      CASE
+        WHEN SUM(pst.fga) = 0 THEN 0
+        ELSE ROUND(SUM(pst.fgm)::numeric / SUM(pst.fga), 4)
+      END AS fg_pct,
+      SUM(pst.tpm) AS tpm,
+      SUM(pst.tpa) AS tpa,
+      CASE
+        WHEN SUM(pst.tpa) = 0 THEN 0
+        ELSE ROUND(SUM(pst.tpm)::numeric / SUM(pst.tpa), 4)
+      END AS tp_pct,
+      SUM(pst.ftm) AS ftm,
+      SUM(pst.fta) AS fta,
+      CASE
+        WHEN SUM(pst.fta) = 0 THEN 0
+        ELSE ROUND(SUM(pst.ftm)::numeric / SUM(pst.fta), 4)
+      END AS ft_pct
+    FROM player_season_totals pst
+    WHERE (%s = '' OR pst.division_id = %s)
+      AND (%s = '' OR COALESCE(pst.season_year, '') = %s)
+      AND (%s = '' OR COALESCE(pst.season_term, '') = %s)
+    GROUP BY pst.player_id, pst.player_name
+    ORDER BY {order_columns[sort]} DESC, pst.player_name ASC
+    LIMIT %s
+    """
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            sql,
+            (
+                division_id,
+                division_id,
+                season_year,
+                season_year,
+                season_term,
+                season_term,
+                limit,
+            ),
+        )
+        return cur.fetchall()
+
+
+@lru_cache(maxsize=32)
+def fetch_postgres_home_summary(division_id=""):
+    with get_postgres_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) AS total_games,
+              COALESCE(TO_CHAR(MAX(game_date), 'FMMonth FMDD, YYYY'), '') AS latest_game_date
+            FROM games
+            WHERE (%s = '' OR division_id = %s)
+            """,
+            (division_id, division_id),
+        )
+        games_row = cur.fetchone() or {}
+
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT player_id) AS total_players
+            FROM player_game_stats
+            WHERE (%s = '' OR division_id = %s)
+            """,
+            (division_id, division_id),
+        )
+        players_row = cur.fetchone() or {}
+
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT team_id) AS total_teams
+            FROM teams
+            WHERE (%s = '' OR division_id = %s)
+            """,
+            (division_id, division_id),
+        )
+        teams_row = cur.fetchone() or {}
+
+        cur.execute(
+            """
+            WITH player_totals AS (
+              SELECT
+                player_id,
+                player_name,
+                SUM(games_played) AS games_played,
+                SUM(pts) AS pts
+              FROM player_season_totals
+              WHERE (%s = '' OR division_id = %s)
+              GROUP BY player_id, player_name
+            )
+            SELECT player_id, player_name, games_played, pts
+            FROM player_totals
+            ORDER BY (pts::float8 / NULLIF(games_played, 0)) DESC NULLS LAST, player_name
+            LIMIT 1
+            """,
+            (division_id, division_id),
+        )
+        scoring_leader = cur.fetchone()
+
+        cur.execute(
+            """
+            WITH player_totals AS (
+              SELECT
+                player_id,
+                player_name,
+                SUM(games_played) AS games_played,
+                SUM(pts) AS pts,
+                SUM(fga) AS fga,
+                SUM(fta) AS fta
+              FROM player_season_totals
+              WHERE (%s = '' OR division_id = %s)
+              GROUP BY player_id, player_name
+            )
+            SELECT player_id, player_name, games_played,
+                   CASE
+                     WHEN (2 * (fga + 0.44 * fta)) = 0 THEN 0
+                     ELSE pts::float8 / (2 * (fga + 0.44 * fta))
+                   END AS ts
+            FROM player_totals
+            WHERE games_played >= 3
+            ORDER BY ts DESC, player_name
+            LIMIT 1
+            """,
+            (division_id, division_id),
+        )
+        efficiency_leader = cur.fetchone()
+
+        cur.execute(
+            """
+            WITH player_totals AS (
+              SELECT
+                player_id,
+                player_name,
+                SUM(games_played) AS games_played,
+                SUM(ast) AS ast,
+                SUM(tov) AS tov
+              FROM player_season_totals
+              WHERE (%s = '' OR division_id = %s)
+              GROUP BY player_id, player_name
+            )
+            SELECT
+              player_id,
+              player_name,
+              games_played,
+              CASE
+                WHEN tov = 0 AND ast > 0 THEN NULL
+                WHEN tov = 0 THEN 0
+                ELSE ast::float8 / tov
+              END AS ast_to,
+              (tov = 0 AND ast > 0) AS perfect
+            FROM player_totals
+            WHERE games_played >= 3
+            ORDER BY
+              CASE WHEN tov = 0 AND ast > 0 THEN 1 ELSE 0 END DESC,
+              CASE WHEN tov = 0 THEN ast::float8 ELSE ast::float8 / NULLIF(tov, 0) END DESC,
+              player_name
+            LIMIT 1
+            """,
+            (division_id, division_id),
+        )
+        playmaking_leader = cur.fetchone()
+
+    return {
+        "total_games": games_row.get("total_games", 0) or 0,
+        "total_players": players_row.get("total_players", 0) or 0,
+        "total_teams": teams_row.get("total_teams", 0) or 0,
+        "latest_game_date": games_row.get("latest_game_date") or "",
+        "scoring_leader": scoring_leader,
+        "efficiency_leader": efficiency_leader,
+        "playmaking_leader": playmaking_leader,
+    }
 
 
 def list_divisions_from_store():
@@ -368,27 +1202,14 @@ def round_metric(value, digits=2):
     return round(float(value or 0), digits)
 
 
-@lru_cache(maxsize=4)
-def _build_team_analytics(_snapshot_key):
+@lru_cache(maxsize=64)
+def _build_team_analytics(_snapshot_key, division_id="", season_year="", season_term=""):
     store = get_csv_store()
-    teams_by_id = {
-        row["team_id"]: {
-            "team_id": row["team_id"],
-            "team_name": row["team_name"],
-            "division_id": row.get("division_id", ""),
-            "division_label": row.get("division_label", ""),
-            "games_played": 0,
-            "wins": 0,
-            "losses": 0,
-            "ties": 0,
-            "points_for": 0,
-            "points_against": 0,
-            "opponents": [],
-        }
-        for row in store["teams"]
-    }
+    teams_by_id = {}
 
     for game in store["games"]:
+        if not matches_filters(game, division_id, season_year, season_term):
+            continue
         team1_id = game.get("team1_id")
         team2_id = game.get("team2_id")
         if not team1_id or not team2_id:
@@ -417,6 +1238,8 @@ def _build_team_analytics(_snapshot_key):
                 {
                     "team_id": team_id,
                     "team_name": team_name or f"Team {team_id}",
+                    "division_id": game.get("division_id", ""),
+                    "division_label": game.get("division_label", ""),
                     "games_played": 0,
                     "wins": 0,
                     "losses": 0,
@@ -513,9 +1336,13 @@ def get_team_analytics_store():
     return _build_team_analytics(csv_snapshot_key())
 
 
-def build_team_summary_from_store(team_id: int):
+def get_filtered_team_analytics_store(division_id="", season_year="", season_term=""):
+    return _build_team_analytics(csv_snapshot_key(), division_id, season_year, season_term)
+
+
+def build_team_summary_from_store(team_id: int, division_id="", season_year="", season_term=""):
     store = get_csv_store()
-    analytics_by_id = get_team_analytics_store()
+    analytics_by_id = get_filtered_team_analytics_store(division_id, season_year, season_term)
     team_by_id = {row["team_id"]: row for row in store["teams"]}
     team_row = team_by_id.get(team_id)
     if team_row is None:
@@ -524,6 +1351,8 @@ def build_team_summary_from_store(team_id: int):
 
     team_game_rows = []
     for game in store["games"]:
+        if not matches_filters(game, division_id, season_year, season_term):
+            continue
         if game["team1_id"] == team_id:
             team_pts = next(
                 (
@@ -580,7 +1409,7 @@ def build_team_summary_from_store(team_id: int):
 
     player_totals = {}
     for row in store["player_game_rows"]:
-        if row["team_id"] != team_id:
+        if row["team_id"] != team_id or not matches_filters(row, division_id, season_year, season_term):
             continue
         player_total = player_totals.setdefault(
             row["player_id"],
@@ -638,7 +1467,11 @@ def build_team_summary_from_store(team_id: int):
 
     players.sort(key=lambda row: (-row["pts"], row["player_name"]))
 
-    totals_rows = [row for row in store["team_totals"] if row["team_id"] == team_id]
+    totals_rows = [
+        row
+        for row in store["team_totals"]
+        if row["team_id"] == team_id and matches_filters(row, division_id, season_year, season_term)
+    ]
     total_fga = sum(row["fga"] for row in totals_rows)
     total_tpa = sum(row["tpa"] for row in totals_rows)
     total_fta = sum(row["fta"] for row in totals_rows)
@@ -647,7 +1480,7 @@ def build_team_summary_from_store(team_id: int):
 
     recent_games = sorted(
         team_game_rows,
-        key=lambda row: (row["game_date"] or "", row["game_id"]),
+        key=lambda row: (game_date_sort_value(row.get("game_date")), row["game_id"]),
         reverse=True,
     )[:5]
     analytics = analytics_by_id.get(team_id, {})
@@ -721,19 +1554,168 @@ def health():
 
 @app.get("/divisions")
 def list_divisions():
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_divisions()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     if csv_enabled():
         return list_divisions_from_store()
     return []
 
 
-@app.get("/players")
-def get_players(division: str | None = Query(None)):
+@app.get("/season-options")
+def list_season_options(division: str | None = Query(None)):
     division_id = normalize_division_id(division)
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_season_options(division_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not csv_enabled():
+        return {"years": [], "season_terms": [], "year_terms": []}
+
+    store = get_csv_store()
+    years = set()
+    season_terms = set()
+    terms_by_year = defaultdict(set)
+
+    for game in store["games"]:
+        if not matches_division(game, division_id):
+            continue
+        year = normalize_year(game.get("season_year"))
+        season_term = normalize_season_term(game.get("season_term"))
+        if year:
+            years.add(year)
+        if season_term:
+            season_terms.add(season_term)
+        if year and season_term:
+            terms_by_year[year].add(season_term)
+
+    sorted_years = sorted(years, reverse=True)
+    sorted_terms = sorted(season_terms, key=season_term_sort_key)
+    return {
+        "years": sorted_years,
+        "season_terms": sorted_terms,
+        "year_terms": [
+            {
+                "year": year,
+                "season_terms": sorted(terms_by_year.get(year, set()), key=season_term_sort_key),
+            }
+            for year in sorted_years
+        ],
+    }
+
+
+@app.get("/home-summary")
+def home_summary(division: str | None = Query(None)):
+    division_id = normalize_division_id(division)
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_home_summary(division_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    store = get_csv_store()
+    filtered_games = [row for row in store["games"] if matches_division(row, division_id)]
+    filtered_players = {
+        row["player_id"] for row in store["player_game_rows"] if matches_division(row, division_id)
+    }
+    filtered_teams = {
+        row["team_id"] for row in store["team_totals"] if matches_division(row, division_id)
+    }
+    leaderboard_rows = leaderboard(limit=200, division=division_id or None)
+    scoring_leader = leaderboard_rows[0] if leaderboard_rows else None
+    efficiency_leader = next(
+        (
+            row
+            for row in sorted(
+                (
+                    {
+                        **row,
+                        "ts": (
+                            row["pts"] / (2 * (row["fga"] + 0.44 * row["fta"]))
+                            if (row["fga"] + 0.44 * row["fta"])
+                            else 0
+                        ),
+                    }
+                    for row in leaderboard_rows
+                    if row["games_played"] >= 3
+                ),
+                key=lambda entry: (entry["ts"], entry["player_name"]),
+                reverse=True,
+            )
+        ),
+        None,
+    )
+    playmaking_leader = next(
+        (
+            row
+            for row in sorted(
+                (
+                    {
+                        **row,
+                        "ast_to": (
+                            None
+                            if row["tov"] == 0 and row["ast"] > 0
+                            else row["ast"] / row["tov"]
+                            if row["tov"]
+                            else 0
+                        ),
+                        "perfect": row["tov"] == 0 and row["ast"] > 0,
+                    }
+                    for row in leaderboard_rows
+                    if row["games_played"] >= 3
+                ),
+                key=lambda entry: (
+                    1 if entry["perfect"] else 0,
+                    entry["ast"] if entry["tov"] == 0 else (entry["ast"] / entry["tov"] if entry["tov"] else 0),
+                    entry["player_name"],
+                ),
+                reverse=True,
+            )
+        ),
+        None,
+    )
+    latest_game = max(
+        filtered_games,
+        key=lambda row: game_date_sort_value(row.get("game_date")),
+        default=None,
+    )
+    return {
+        "total_games": len(filtered_games),
+        "total_players": len(filtered_players),
+        "total_teams": len(filtered_teams),
+        "latest_game_date": latest_game["game_date"] if latest_game else "",
+        "scoring_leader": scoring_leader,
+        "efficiency_leader": efficiency_leader,
+        "playmaking_leader": playmaking_leader,
+    }
+
+
+@app.get("/players")
+def get_players(
+    division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
+):
+    division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_players(division_id, season_year, normalized_season_term)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
         store = get_csv_store()
         if not division_id:
             players = {}
             for row in store["player_game_rows"]:
+                if not matches_filters(row, division_id, season_year, normalized_season_term):
+                    continue
                 player = players.setdefault(
                     row["player_id"],
                     {
@@ -750,7 +1732,7 @@ def get_players(division: str | None = Query(None)):
         else:
             players = {}
             for row in store["player_game_rows"]:
-                if not matches_division(row, division_id):
+                if not matches_filters(row, division_id, season_year, normalized_season_term):
                     continue
                 player = players.setdefault(
                     row["player_id"],
@@ -788,13 +1770,242 @@ def get_players(division: str | None = Query(None)):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/players-page")
+def get_players_page(
+    q: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
+):
+    division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    query = normalize_space(q).lower()
+    offset = (page - 1) * limit
+
+    if postgres_analytics_enabled():
+        cte = f"""
+        WITH filtered_players AS (
+          SELECT
+            p.player_id,
+            p.player_name,
+            COUNT(DISTINCT pgs.division_id) AS division_count,
+            ARRAY_AGG(DISTINCT pgs.division_id ORDER BY pgs.division_id) AS division_ids,
+            ARRAY_AGG(DISTINCT pgs.division_label ORDER BY pgs.division_label) AS division_labels
+          FROM players p
+          JOIN player_game_stats pgs ON pgs.player_id = p.player_id
+          WHERE {postgres_filter_sql('pgs')}
+            AND (%s = '' OR LOWER(p.player_name) LIKE %s)
+          GROUP BY p.player_id, p.player_name
+        )
+        """
+        try:
+            with get_postgres_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    cte + "SELECT COUNT(*) AS total FROM filtered_players",
+                    (
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                        query,
+                        f"%{query}%",
+                    ),
+                )
+                total = (cur.fetchone() or {}).get("total", 0) or 0
+                cur.execute(
+                    cte
+                    + """
+                    SELECT *
+                    FROM filtered_players
+                    ORDER BY player_name
+                    LIMIT %s OFFSET %s
+                    """,
+                    (
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                        query,
+                        f"%{query}%",
+                        limit,
+                        offset,
+                    ),
+                )
+                items = cur.fetchall()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "total_pages": (total + limit - 1) // limit if total else 0,
+        }
+
+    if csv_enabled():
+        players = get_players(division=division, year=year, season_term=season_term)
+        if query:
+            players = [
+                row for row in players if query in normalize_space(row.get("player_name")).lower()
+            ]
+        total = len(players)
+        return {
+            "items": players[offset : offset + limit],
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "total_pages": (total + limit - 1) // limit if total else 0,
+        }
+
+    return {"items": [], "total": 0, "page": page, "page_size": limit, "total_pages": 0}
+
+
+@app.get("/players/{player_id}")
+def get_player(player_id: int):
+    if postgres_analytics_enabled():
+        try:
+            player = fetch_postgres_player_identity(player_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if player is None:
+            raise HTTPException(status_code=404, detail="player not found")
+        return player
+
+    if csv_enabled():
+        store = get_csv_store()
+        player_name = ""
+        division_ids = set()
+        division_labels = set()
+        for row in store["player_game_rows"]:
+            if row["player_id"] != player_id:
+                continue
+            player_name = row["player_name"]
+            if row.get("division_id"):
+                division_ids.add(row["division_id"])
+            if row.get("division_label"):
+                division_labels.add(row["division_label"])
+        if not player_name:
+            raise HTTPException(status_code=404, detail="player not found")
+        return {
+            "player_id": player_id,
+            "player_name": player_name,
+            "division_count": len(division_ids),
+            "division_ids": sorted(division_ids),
+            "division_labels": sorted(division_labels),
+        }
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT player_id, player_name FROM players WHERE player_id = %s", (player_id,))
+        player = cur.fetchone()
+        if player is None:
+            raise HTTPException(status_code=404, detail="player not found")
+        return player
+
+
 @app.get("/players/{player_id}/games")
 def player_game_log(
     player_id: int,
     limit: int = Query(50, ge=1, le=500),
     division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
 ):
     division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    if postgres_analytics_enabled():
+        sql = f"""
+        SELECT
+          pgs.game_id,
+          g.game_key,
+          pgs.division_id,
+          pgs.division_label,
+          g.game_url,
+          COALESCE(TO_CHAR(g.game_date, 'FMMonth FMDD, YYYY'), '') AS game_date,
+          pgs.team_id,
+          pgs.team_name,
+          CASE
+            WHEN g.team1_id = pgs.team_id THEN g.team2_name
+            ELSE g.team1_name
+          END AS opponent_team_name,
+          CASE
+            WHEN g.team1_id = pgs.team_id THEN g.team1_pts
+            ELSE g.team2_pts
+          END AS team_pts,
+          CASE
+            WHEN g.team1_id = pgs.team_id THEN g.team2_pts
+            ELSE g.team1_pts
+          END AS opponent_pts,
+          CASE
+            WHEN (
+              CASE WHEN g.team1_id = pgs.team_id THEN g.team1_pts ELSE g.team2_pts END
+            ) > (
+              CASE WHEN g.team1_id = pgs.team_id THEN g.team2_pts ELSE g.team1_pts END
+            ) THEN 'W'
+            WHEN (
+              CASE WHEN g.team1_id = pgs.team_id THEN g.team1_pts ELSE g.team2_pts END
+            ) < (
+              CASE WHEN g.team1_id = pgs.team_id THEN g.team2_pts ELSE g.team1_pts END
+            ) THEN 'L'
+            ELSE 'T'
+          END AS result,
+          pgs.pts,
+          pgs.reb,
+          pgs.ast,
+          pgs.stl,
+          pgs.blk,
+          pgs.tov,
+          pgs.fouls,
+          pgs.fgm,
+          pgs.fga,
+          pgs.fg_pct,
+          pgs.tpm,
+          pgs.tpa,
+          pgs.tp_pct,
+          pgs.ftm,
+          pgs.fta,
+          pgs.ft_pct
+        FROM player_game_stats pgs
+        JOIN games g ON g.game_id = pgs.game_id
+        WHERE pgs.player_id = %s
+          AND {postgres_filter_sql('pgs')}
+        ORDER BY g.game_date DESC NULLS LAST, pgs.game_id DESC
+        LIMIT %s
+        """
+        try:
+            with get_postgres_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    (
+                        player_id,
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                        limit,
+                    ),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    cur.execute("SELECT 1 FROM players WHERE player_id = %s", (player_id,))
+                    if cur.fetchone() is None:
+                        raise HTTPException(status_code=404, detail="player not found")
+                return rows
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
         store = get_csv_store()
         player_ids = {row["player_id"] for row in store["players"]}
@@ -871,9 +2082,13 @@ def player_game_log(
                 "ft_pct": row["ft_pct"],
             }
             for row in store["player_game_rows"]
-            if row["player_id"] == player_id and matches_division(row, division_id)
+            if row["player_id"] == player_id
+            and matches_filters(row, division_id, season_year, normalized_season_term)
         ]
-        rows.sort(key=lambda row: (row["game_date"] or "", row["game_id"]), reverse=True)
+        rows.sort(
+            key=lambda row: (game_date_sort_value(row.get("game_date")), row["game_id"]),
+            reverse=True,
+        )
         if not rows and player_id not in player_ids:
             raise HTTPException(status_code=404, detail="player not found")
         return rows[:limit]
@@ -924,12 +2139,28 @@ def leaderboard(
     sort: str = Query("pts"),
     limit: int = Query(50, ge=1, le=5000),
     division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
 ):
     division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_leaderboard(
+                sort,
+                limit,
+                division_id,
+                season_year,
+                normalized_season_term,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
         totals = {}
         for row in get_csv_store()["player_game_rows"]:
-            if not matches_division(row, division_id):
+            if not matches_filters(row, division_id, season_year, normalized_season_term):
                 continue
             player_id = row["player_id"]
             player_total = totals.setdefault(
@@ -1058,14 +2289,27 @@ def leaderboard(
 
 
 @app.get("/teams")
-def list_teams(division: str | None = Query(None)):
+def list_teams(
+    division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
+):
     division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_team_analytics(division_id, season_year, normalized_season_term)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
         return sorted(
             [
                 row
-                for row in get_team_analytics_store().values()
-                if matches_division(row, division_id)
+                for row in get_filtered_team_analytics_store(
+                    division_id, season_year, normalized_season_term
+                ).values()
             ],
             key=lambda row: (
                 -row["wins"],
@@ -1132,9 +2376,199 @@ def team_roster(team_id: int):
 
 
 @app.get("/teams/{team_id}/summary")
-def team_summary(team_id: int):
+def team_summary(
+    team_id: int,
+    division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
+):
+    division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    if postgres_analytics_enabled():
+        try:
+            analytics_rows = fetch_postgres_team_analytics(
+                division_id, season_year, normalized_season_term
+            )
+            analytics = next((row for row in analytics_rows if row["team_id"] == team_id), None)
+
+            with get_postgres_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT team_id, team_name, division_id, division_label FROM teams WHERE team_id = %s",
+                    (team_id,),
+                )
+                team = cur.fetchone()
+                if team is None:
+                    raise HTTPException(status_code=404, detail="team not found")
+
+                cur.execute(
+                    f"""
+                    SELECT
+                      p.player_id,
+                      p.player_name,
+                      COUNT(DISTINCT pgs.game_id) AS games_played,
+                      SUM(pgs.pts) AS pts,
+                      SUM(pgs.reb) AS reb,
+                      SUM(pgs.ast) AS ast,
+                      SUM(pgs.stl) AS stl,
+                      SUM(pgs.blk) AS blk,
+                      SUM(pgs.tov) AS tov,
+                      SUM(pgs.fouls) AS fouls,
+                      SUM(pgs.fgm) AS fgm,
+                      SUM(pgs.fga) AS fga,
+                      CASE WHEN SUM(pgs.fga) = 0 THEN 0 ELSE ROUND((SUM(pgs.fgm)::numeric / SUM(pgs.fga)), 4)::float8 END AS fg_pct,
+                      SUM(pgs.tpm) AS tpm,
+                      SUM(pgs.tpa) AS tpa,
+                      CASE WHEN SUM(pgs.tpa) = 0 THEN 0 ELSE ROUND((SUM(pgs.tpm)::numeric / SUM(pgs.tpa)), 4)::float8 END AS tp_pct,
+                      SUM(pgs.ftm) AS ftm,
+                      SUM(pgs.fta) AS fta,
+                      CASE WHEN SUM(pgs.fta) = 0 THEN 0 ELSE ROUND((SUM(pgs.ftm)::numeric / SUM(pgs.fta)), 4)::float8 END AS ft_pct
+                    FROM player_game_stats pgs
+                    JOIN players p ON p.player_id = pgs.player_id
+                    WHERE pgs.team_id = %s
+                      AND {postgres_filter_sql('pgs')}
+                    GROUP BY p.player_id, p.player_name
+                    ORDER BY SUM(pgs.pts) DESC, p.player_name
+                    """,
+                    (
+                        team_id,
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                    ),
+                )
+                players = cur.fetchall()
+
+                cur.execute(
+                    f"""
+                    SELECT
+                      COALESCE(SUM(tgt.pts), 0) AS pts,
+                      COALESCE(SUM(tgt.reb), 0) AS reb,
+                      COALESCE(SUM(tgt.ast), 0) AS ast,
+                      COALESCE(SUM(tgt.stl), 0) AS stl,
+                      COALESCE(SUM(tgt.blk), 0) AS blk,
+                      COALESCE(SUM(tgt.tov), 0) AS tov,
+                      COALESCE(SUM(tgt.pf), 0) AS fouls,
+                      COALESCE(SUM(tgt.fgm), 0) AS fgm,
+                      COALESCE(SUM(tgt.fga), 0) AS fga,
+                      CASE WHEN COALESCE(SUM(tgt.fga), 0) = 0 THEN 0 ELSE ROUND((SUM(tgt.fgm)::numeric / SUM(tgt.fga)), 4)::float8 END AS fg_pct,
+                      COALESCE(SUM(tgt.tpm), 0) AS tpm,
+                      COALESCE(SUM(tgt.tpa), 0) AS tpa,
+                      CASE WHEN COALESCE(SUM(tgt.tpa), 0) = 0 THEN 0 ELSE ROUND((SUM(tgt.tpm)::numeric / SUM(tgt.tpa)), 4)::float8 END AS tp_pct,
+                      COALESCE(SUM(tgt.ftm), 0) AS ftm,
+                      COALESCE(SUM(tgt.fta), 0) AS fta,
+                      CASE WHEN COALESCE(SUM(tgt.fta), 0) = 0 THEN 0 ELSE ROUND((SUM(tgt.ftm)::numeric / SUM(tgt.fta)), 4)::float8 END AS ft_pct
+                    FROM team_game_totals tgt
+                    WHERE tgt.team_id = %s
+                      AND {postgres_filter_sql('tgt')}
+                    """,
+                    (
+                        team_id,
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                    ),
+                )
+                totals = cur.fetchone() or {}
+
+                cur.execute(
+                    f"""
+                    SELECT
+                      g.game_id,
+                      g.game_key,
+                      COALESCE(TO_CHAR(g.game_date, 'FMMonth FMDD, YYYY'), '') AS game_date,
+                      g.game_url,
+                      CASE WHEN g.team1_id = %s THEN g.team2_name ELSE g.team1_name END AS opponent_team_name,
+                      CASE WHEN g.team1_id = %s THEN g.team1_pts ELSE g.team2_pts END AS team_pts,
+                      CASE WHEN g.team1_id = %s THEN g.team2_pts ELSE g.team1_pts END AS opponent_pts,
+                      CASE
+                        WHEN (CASE WHEN g.team1_id = %s THEN g.team1_pts ELSE g.team2_pts END)
+                           > (CASE WHEN g.team1_id = %s THEN g.team2_pts ELSE g.team1_pts END) THEN 'W'
+                        WHEN (CASE WHEN g.team1_id = %s THEN g.team1_pts ELSE g.team2_pts END)
+                           < (CASE WHEN g.team1_id = %s THEN g.team2_pts ELSE g.team1_pts END) THEN 'L'
+                        ELSE 'T'
+                      END AS result
+                    FROM games g
+                    WHERE (g.team1_id = %s OR g.team2_id = %s)
+                      AND {postgres_filter_sql('g')}
+                    ORDER BY g.game_date DESC NULLS LAST, g.game_id DESC
+                    LIMIT 5
+                    """,
+                    (
+                        team_id,
+                        team_id,
+                        team_id,
+                        team_id,
+                        team_id,
+                        team_id,
+                        team_id,
+                        team_id,
+                        team_id,
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                    ),
+                )
+                recent_games = cur.fetchall()
+
+            analytics = analytics or {}
+            return {
+                "team_id": team_id,
+                "division_id": analytics.get("division_id", team.get("division_id", "")),
+                "division_label": analytics.get("division_label", team.get("division_label", "")),
+                "team_name": team["team_name"],
+                "games_played": analytics.get("games_played", 0) or 0,
+                "wins": analytics.get("wins", 0) or 0,
+                "losses": analytics.get("losses", 0) or 0,
+                "pts": totals.get("pts", 0) or 0,
+                "reb": totals.get("reb", 0) or 0,
+                "ast": totals.get("ast", 0) or 0,
+                "stl": totals.get("stl", 0) or 0,
+                "blk": totals.get("blk", 0) or 0,
+                "tov": totals.get("tov", 0) or 0,
+                "fouls": totals.get("fouls", 0) or 0,
+                "fgm": totals.get("fgm", 0) or 0,
+                "fga": totals.get("fga", 0) or 0,
+                "fg_pct": totals.get("fg_pct", 0) or 0,
+                "tpm": totals.get("tpm", 0) or 0,
+                "tpa": totals.get("tpa", 0) or 0,
+                "tp_pct": totals.get("tp_pct", 0) or 0,
+                "ftm": totals.get("ftm", 0) or 0,
+                "fta": totals.get("fta", 0) or 0,
+                "ft_pct": totals.get("ft_pct", 0) or 0,
+                "win_pct": analytics.get("win_pct", 0) or 0,
+                "offensive_rating": analytics.get("offensive_rating", 0) or 0,
+                "defensive_rating": analytics.get("defensive_rating", 0) or 0,
+                "net_rating": analytics.get("net_rating", 0) or 0,
+                "strength_of_schedule": analytics.get("strength_of_schedule", 0) or 0,
+                "opponent_win_pct": analytics.get("opponent_win_pct", 0) or 0,
+                "adjusted_offensive_rating": analytics.get("adjusted_offensive_rating", 0) or 0,
+                "adjusted_defensive_rating": analytics.get("adjusted_defensive_rating", 0) or 0,
+                "adjusted_net_rating": analytics.get("adjusted_net_rating", 0) or 0,
+                "players": players,
+                "recent_games": recent_games,
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
-        return build_team_summary_from_store(team_id)
+        return build_team_summary_from_store(
+            team_id,
+            division_id=division_id,
+            season_year=season_year,
+            season_term=normalized_season_term,
+        )
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT team_name FROM teams WHERE team_id = %s", (team_id,))
@@ -1276,17 +2710,43 @@ def team_summary(team_id: int):
 def list_games(
     limit: int = Query(100, ge=1, le=500),
     division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
+    sort_by: str = Query("date_desc"),
 ):
     division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    allowed_sorts = {
+        "date_desc",
+        "date_asc",
+        "season_desc",
+        "season_asc",
+        "division_asc",
+        "division_desc",
+    }
+    if sort_by not in allowed_sorts:
+        raise HTTPException(status_code=400, detail=f"sort_by must be one of {sorted(allowed_sorts)}")
+    if postgres_analytics_enabled():
+        try:
+            return fetch_postgres_games(
+                division_id,
+                season_year,
+                normalized_season_term,
+                sort_by,
+                limit,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
-        games = sorted(
+        games = sort_games(
             [
                 row
                 for row in get_csv_store()["games"]
-                if matches_division(row, division_id)
+                if matches_filters(row, division_id, season_year, normalized_season_term)
             ],
-            key=lambda row: (row["game_date"] or "", row["game_id"]),
-            reverse=True,
+            sort_by,
         )
         return games[:limit]
 
@@ -1313,6 +2773,130 @@ def list_games(
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(sql, (limit,))
         return cur.fetchall()
+
+
+@app.get("/games-page")
+def list_games_page(
+    page: int = Query(1, ge=1),
+    limit: int = Query(40, ge=1, le=100),
+    division: str | None = Query(None),
+    year: str | None = Query(None),
+    season_term: str | None = Query(None),
+    sort_by: str = Query("date_desc"),
+):
+    division_id = normalize_division_id(division)
+    season_year = normalize_year(year)
+    normalized_season_term = normalize_season_term(season_term)
+    allowed_sorts = {
+        "date_desc",
+        "date_asc",
+        "season_desc",
+        "season_asc",
+        "division_asc",
+        "division_desc",
+    }
+    if sort_by not in allowed_sorts:
+        raise HTTPException(status_code=400, detail=f"sort_by must be one of {sorted(allowed_sorts)}")
+    offset = (page - 1) * limit
+
+    if postgres_analytics_enabled():
+        try:
+            with get_postgres_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*) AS total
+                    FROM games g
+                    WHERE {postgres_filter_sql('g')}
+                    """,
+                    (
+                        division_id,
+                        division_id,
+                        season_year,
+                        season_year,
+                        normalized_season_term,
+                        normalized_season_term,
+                    ),
+                )
+                total = (cur.fetchone() or {}).get("total", 0) or 0
+            items = fetch_postgres_games(
+                division_id,
+                season_year,
+                normalized_season_term,
+                sort_by,
+                limit,
+                offset,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "total_pages": (total + limit - 1) // limit if total else 0,
+        }
+
+    if csv_enabled():
+        games = list_games(
+            limit=5000,
+            division=division,
+            year=year,
+            season_term=season_term,
+            sort_by=sort_by,
+        )
+        total = len(games)
+        return {
+            "items": games[offset : offset + limit],
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "total_pages": (total + limit - 1) // limit if total else 0,
+        }
+
+    return {"items": [], "total": 0, "page": page, "page_size": limit, "total_pages": 0}
+
+
+@app.get("/games/{game_id}")
+def get_game(game_id: int):
+    if postgres_analytics_enabled():
+        try:
+            game = fetch_postgres_game_summary(game_id)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if game is None:
+            raise HTTPException(status_code=404, detail="game not found")
+        return game
+
+    if csv_enabled():
+        game = next((row for row in get_csv_store()["games"] if row["game_id"] == game_id), None)
+        if game is None:
+            raise HTTPException(status_code=404, detail="game not found")
+        return game
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              id AS game_id,
+              game_key,
+              game_url,
+              game_date,
+              team1_name,
+              team1_pts,
+              team2_name,
+              team2_pts,
+              venue,
+              league
+            FROM d3_games
+            WHERE id = %s
+            """,
+            (game_id,),
+        )
+        game = cur.fetchone()
+        if game is None:
+            raise HTTPException(status_code=404, detail="game not found")
+        return game
 
 
 @app.get("/games/{game_id}/boxscore")

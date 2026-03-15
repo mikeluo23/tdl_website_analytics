@@ -96,6 +96,99 @@ Notes:
 - `refresh_d3_mondays.py` is now just a compatibility wrapper for the old single-division flow.
 - Multi-division refresh currently targets CSV mode. The legacy MySQL schema is still single-division-oriented, so use `--skip-db` when scraping more than `d3_mondays`.
 
+## Historical Backfill
+
+Historical scraping is now isolated in a separate script so it can be tested locally without changing the live site data path:
+
+```bash
+cd TDLStats
+python backfill_history.py --validate-config
+python backfill_history.py --division d3_mondays --max-new-events 10
+python backfill_history.py
+```
+
+What it does:
+
+- Starts from each division's `leaders_url` page in [`division_specs.yaml`](/C:/Users/luomi/d3-stats-frontend/TDLStats/division_specs.yaml)
+- Discovers player profile pages
+- Reads each player's page and collects unique event URLs from game logs
+- Skips player pages and event pages that have already been visited
+- Writes separate historical files:
+  - [`historical_games.csv`](/C:/Users/luomi/d3-stats-frontend/TDLStats/historical_games.csv)
+  - [`historical_player_game_stats.csv`](/C:/Users/luomi/d3-stats-frontend/TDLStats/historical_player_game_stats.csv)
+  - [`historical_team_game_totals.csv`](/C:/Users/luomi/d3-stats-frontend/TDLStats/historical_team_game_totals.csv)
+  - [`historical_team_lineages.csv`](/C:/Users/luomi/d3-stats-frontend/TDLStats/historical_team_lineages.csv)
+  - plus player/game discovery manifests for dedupe
+
+Important rollback boundary:
+
+- The current app/API does not read these historical files yet
+- The existing live refresh flow still only uses [`refresh_divisions.py`](/C:/Users/luomi/d3-stats-frontend/TDLStats/refresh_divisions.py) and the current CSV snapshots
+- If the historical crawler needs to be abandoned, stop running it or delete the `historical_*.csv` files; the live site remains unchanged
+
+Historical team identity rule:
+
+- Same normalized team name + same division id across seasons = same lineage
+- Different team name = new lineage
+- Different division id = new lineage
+- Each season still gets its own team-season record in the historical totals output
+
+## PostgreSQL Import
+
+If the merged CSV store becomes too slow locally, you can import the current dataset into PostgreSQL without changing the live API mode yet.
+
+1. Add PostgreSQL connection settings to [`TDLStats/.env`](/C:/Users/luomi/d3-stats-frontend/TDLStats/.env):
+
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=tdl_stats
+DB_USER=postgres
+DB_PASSWORD=your_password_here
+```
+
+2. Install/update backend dependencies:
+
+```bash
+cd TDLStats
+python -m pip install -r requirements.txt
+```
+
+3. Import the current merged CSV-backed store into PostgreSQL:
+
+```bash
+cd TDLStats
+python sync_postgres.py --truncate
+```
+
+What it writes:
+
+- `teams`
+- `players`
+- `games`
+- `player_game_stats`
+- `team_game_totals`
+- `player_season_totals`
+- `team_season_totals`
+
+This is currently a safe staging step:
+
+- it uses the same merged data that the CSV-backed API already sees
+- it does not replace the current API mode yet
+- if the import looks wrong, you can rerun it after fixing data issues without affecting the live CSV flow
+
+To switch the heavy leaderboard metadata endpoints to PostgreSQL locally, add this to [`TDLStats/.env`](/C:/Users/luomi/d3-stats-frontend/TDLStats/.env):
+
+```env
+POSTGRES_ANALYTICS=1
+```
+
+That currently moves these endpoints to PostgreSQL while the rest of the site can stay on the CSV-backed path:
+
+- `/divisions`
+- `/season-options`
+- `/leaderboard`
+
 ## Expected API Endpoints
 
 The frontend currently assumes these endpoints exist:

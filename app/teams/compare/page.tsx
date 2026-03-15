@@ -1,7 +1,7 @@
 import Link from "next/link";
 import TeamCompareControls from "@/app/components/TeamCompareControls";
 import { apiGet } from "@/lib/api";
-import { normalizeDivision, withDivision, withQuery } from "@/lib/divisions";
+import { normalizeDivision, withQuery, withStatsFilters } from "@/lib/divisions";
 import {
   calcEfgPercent,
   calcGameScore,
@@ -246,12 +246,16 @@ function TeamPanel({
 export default async function TeamComparePage({
   searchParams,
 }: {
-  searchParams: Promise<{ division?: string; a?: string; b?: string }>;
+  searchParams: Promise<{ division?: string; year?: string; season_term?: string; a?: string; b?: string }>;
 }) {
-  const { division, a, b } = await searchParams;
+  const { division, year = "", season_term: seasonTerm = "", a, b } = await searchParams;
   const divisionId = normalizeDivision(division);
   const teams = await apiGet<TeamOption[]>(
-    withQuery("/teams", { division: divisionId || undefined }),
+    withQuery("/teams", {
+      division: divisionId || undefined,
+      year: year || undefined,
+      season_term: seasonTerm || undefined,
+    }),
   );
 
   if (teams.length === 0) {
@@ -267,8 +271,20 @@ export default async function TeamComparePage({
   const teamBId = Number(b) || fallbackB;
 
   const [teamA, teamB] = await Promise.all([
-    apiGet<TeamSummary>(`/teams/${teamAId}/summary`),
-    apiGet<TeamSummary>(`/teams/${teamBId}/summary`),
+    apiGet<TeamSummary>(
+      withQuery(`/teams/${teamAId}/summary`, {
+        division: divisionId || undefined,
+        year: year || undefined,
+        season_term: seasonTerm || undefined,
+      }),
+    ),
+    apiGet<TeamSummary>(
+      withQuery(`/teams/${teamBId}/summary`, {
+        division: divisionId || undefined,
+        year: year || undefined,
+        season_term: seasonTerm || undefined,
+      }),
+    ),
   ]);
 
   const aMetrics = buildDerivedMetrics(teamA);
@@ -285,7 +301,7 @@ export default async function TeamComparePage({
             </p>
           </div>
           <Link
-            href={withDivision("/teams", divisionId)}
+            href={withStatsFilters("/teams", { division: divisionId, year, seasonTerm })}
             className="text-zinc-400 hover:text-white"
           >
             {"<- Back to Teams"}
@@ -296,6 +312,8 @@ export default async function TeamComparePage({
           <TeamCompareControls
             teams={teams}
             division={divisionId}
+            year={year}
+            seasonTerm={seasonTerm}
             teamAId={teamA.team_id}
             teamBId={teamB.team_id}
           />

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { apiGet } from "@/lib/api";
-import { normalizeDivision, withDivision, withQuery } from "@/lib/divisions";
+import { normalizeDivision, withStatsFilters } from "@/lib/divisions";
 
 type GameRow = {
   game_id: number;
@@ -153,10 +153,10 @@ export default async function GameBoxscorePage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ division?: string }>;
+  searchParams: Promise<{ division?: string; year?: string; season_term?: string }>;
 }) {
   const { id } = await params;
-  const { division } = await searchParams;
+  const { division, year = "", season_term: seasonTerm = "" } = await searchParams;
   const gameId = Number(id);
   const divisionId = normalizeDivision(division);
 
@@ -168,7 +168,10 @@ export default async function GameBoxscorePage({
           <p className="mb-6 text-zinc-400">
             Got: <code className="text-red-300">{id}</code>
           </p>
-          <Link href={withDivision("/games", divisionId)} className="text-zinc-300 hover:text-white">
+          <Link
+            href={withStatsFilters("/games", { division: divisionId, year, seasonTerm })}
+            className="text-zinc-300 hover:text-white"
+          >
             {"<- Back to Games"}
           </Link>
         </div>
@@ -176,11 +179,10 @@ export default async function GameBoxscorePage({
     );
   }
 
-  const [rows, games] = await Promise.all([
+  const [rows, game] = await Promise.all([
     apiGet<BoxRow[]>(`/games/${gameId}/boxscore`),
-    apiGet<GameRow[]>(withQuery("/games", { division: divisionId || undefined })),
+    apiGet<GameRow>(`/games/${gameId}`),
   ]);
-  const game = games.find((item) => item.game_id === gameId);
   const grouped = rows.reduce<Record<string, BoxRow[]>>((acc, row) => {
     if (!acc[row.team_name]) acc[row.team_name] = [];
     acc[row.team_name].push(row);
@@ -216,7 +218,10 @@ export default async function GameBoxscorePage({
                 Source
               </a>
             ) : null}
-            <Link href={withDivision("/games", divisionId)} className="text-zinc-400 hover:text-white">
+            <Link
+              href={withStatsFilters("/games", { division: divisionId, year, seasonTerm })}
+              className="text-zinc-400 hover:text-white"
+            >
               {"<- Back to Games"}
             </Link>
           </div>

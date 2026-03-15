@@ -4,6 +4,7 @@ lxml
 python-dotenv
 PyYAML
 pymysql
+psycopg[binary]
 requests
 sqlalchemy
 uvicorn

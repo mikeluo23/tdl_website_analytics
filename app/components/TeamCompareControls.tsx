@@ -12,6 +12,8 @@ type TeamOption = {
 type TeamCompareControlsProps = {
   teams: TeamOption[];
   division?: string;
+  year?: string;
+  seasonTerm?: string;
   teamAId: number;
   teamBId: number;
 };
@@ -19,6 +21,8 @@ type TeamCompareControlsProps = {
 export default function TeamCompareControls({
   teams,
   division,
+  year,
+  seasonTerm,
   teamAId,
   teamBId,
 }: TeamCompareControlsProps) {
@@ -30,6 +34,8 @@ export default function TeamCompareControls({
         a: nextA,
         b: nextB,
         division: division || undefined,
+        year: year || undefined,
+        season_term: seasonTerm || undefined,
       }),
     );
   };

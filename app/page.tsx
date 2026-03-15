@@ -2,42 +2,25 @@ import Link from "next/link";
 import { apiGet } from "@/lib/api";
 import { normalizeDivision, withDivision, withQuery } from "@/lib/divisions";
 
-type Team = {
-  team_id: number;
-  team_name: string;
-};
-
-type Player = {
-  player_id: number;
-  player_name: string;
-};
-
-type Game = {
-  game_id: number;
-  game_date: string;
-};
-
-type Leader = {
+type HomeLeader = {
   player_id: number;
   player_name: string;
   games_played: number;
-  pts: number;
-  reb: number;
-  ast: number;
-  stl: number;
-  blk: number;
-  tov: number;
-  fgm: number;
-  fga: number;
-  tpm: number;
-  tpa: number;
-  ftm: number;
-  fta: number;
+  pts?: number;
+  ts?: number;
+  ast_to?: number | null;
+  perfect?: boolean;
 };
 
-function pct(value: number) {
-  return `${(value * 100).toFixed(1)}%`;
-}
+type HomeSummary = {
+  total_games: number;
+  total_players: number;
+  total_teams: number;
+  latest_game_date: string;
+  scoring_leader?: HomeLeader | null;
+  efficiency_leader?: HomeLeader | null;
+  playmaking_leader?: HomeLeader | null;
+};
 
 export default async function Home({
   searchParams,
@@ -46,33 +29,9 @@ export default async function Home({
 }) {
   const { division } = await searchParams;
   const divisionId = normalizeDivision(division);
-
-  const [games, teams, players, leaderboard] = await Promise.all([
-    apiGet<Game[]>(withQuery("/games", { division: divisionId || undefined, limit: 500 })),
-    apiGet<Team[]>(withQuery("/teams", { division: divisionId || undefined })),
-    apiGet<Player[]>(withQuery("/players", { division: divisionId || undefined })),
-    apiGet<Leader[]>(withQuery("/leaderboard", { division: divisionId || undefined })),
-  ]);
-
-  const scoringLeader = leaderboard[0];
-  const efficiencyLeader = [...leaderboard]
-    .filter((row) => row.games_played >= 3)
-    .map((row) => {
-      const denom = 2 * (row.fga + 0.44 * row.fta);
-      return {
-        ...row,
-        ts: denom ? row.pts / denom : 0,
-      };
-    })
-    .sort((a, b) => b.ts - a.ts)[0];
-
-  const playmakingLeader = [...leaderboard]
-    .filter((row) => row.games_played >= 3)
-    .map((row) => ({
-      ...row,
-      astTo: row.tov ? row.ast / row.tov : row.ast > 0 ? Infinity : 0,
-    }))
-    .sort((a, b) => b.astTo - a.astTo)[0];
+  const summary = await apiGet<HomeSummary>(
+    withQuery("/home-summary", { division: divisionId || undefined }),
+  );
 
   return (
     <main className="min-h-screen px-6 py-10 sm:px-8">
@@ -109,48 +68,54 @@ export default async function Home({
               <div className="mt-8 grid gap-4 sm:grid-cols-4">
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Games</div>
-                  <div className="mt-2 text-3xl font-semibold text-white">{games.length}</div>
+                  <div className="mt-2 text-3xl font-semibold text-white">{summary.total_games}</div>
                 </div>
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Players</div>
-                  <div className="mt-2 text-3xl font-semibold text-white">{players.length}</div>
+                  <div className="mt-2 text-3xl font-semibold text-white">{summary.total_players}</div>
                 </div>
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Teams</div>
-                  <div className="mt-2 text-3xl font-semibold text-white">{teams.length}</div>
+                  <div className="mt-2 text-3xl font-semibold text-white">{summary.total_teams}</div>
                 </div>
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Latest Game</div>
                   <div className="mt-2 text-lg font-semibold text-white">
-                    {games[0]?.game_date ?? "Unknown"}
+                    {summary.latest_game_date || "Unknown"}
                   </div>
                 </div>
               </div>
             </div>
 
             <div className="grid gap-4 self-end">
-              {scoringLeader ? (
+              {summary.scoring_leader ? (
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Scoring Leader</div>
-                  <div className="mt-2 text-2xl font-semibold text-white">{scoringLeader.player_name}</div>
+                  <div className="mt-2 text-2xl font-semibold text-white">{summary.scoring_leader.player_name}</div>
                   <div className="mt-1 text-sm text-zinc-400">
-                    {(scoringLeader.pts / Math.max(scoringLeader.games_played, 1)).toFixed(1)} PPG
+                    {((summary.scoring_leader.pts ?? 0) / Math.max(summary.scoring_leader.games_played, 1)).toFixed(1)} PPG
                   </div>
                 </div>
               ) : null}
-              {efficiencyLeader ? (
+              {summary.efficiency_leader ? (
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Best TS% (min 3 GP)</div>
-                  <div className="mt-2 text-2xl font-semibold text-white">{efficiencyLeader.player_name}</div>
-                  <div className="mt-1 text-sm text-zinc-400">{pct(efficiencyLeader.ts)}</div>
+                  <div className="mt-2 text-2xl font-semibold text-white">{summary.efficiency_leader.player_name}</div>
+                  <div className="mt-1 text-sm text-zinc-400">
+                    {`${((summary.efficiency_leader.ts ?? 0) * 100).toFixed(1)}%`}
+                  </div>
                 </div>
               ) : null}
-              {playmakingLeader ? (
+              {summary.playmaking_leader ? (
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-5">
                   <div className="text-xs uppercase tracking-wide text-zinc-500">Best AST/TO (min 3 GP)</div>
-                  <div className="mt-2 text-2xl font-semibold text-white">{playmakingLeader.player_name}</div>
+                  <div className="mt-2 text-2xl font-semibold text-white">{summary.playmaking_leader.player_name}</div>
                   <div className="mt-1 text-sm text-zinc-400">
-                    {Number.isFinite(playmakingLeader.astTo) ? playmakingLeader.astTo.toFixed(2) : "Perfect"}
+                    {summary.playmaking_leader.perfect
+                      ? "Perfect"
+                      : Number.isFinite(summary.playmaking_leader.ast_to)
+                        ? Number(summary.playmaking_leader.ast_to).toFixed(2)
+                        : "0.00"}
                   </div>
                 </div>
               ) : null}
