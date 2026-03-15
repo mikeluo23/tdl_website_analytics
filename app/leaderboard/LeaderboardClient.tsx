@@ -395,6 +395,11 @@ function safeId(row: Row) {
   return num(row.player_id ?? row.id);
 }
 
+function truncateLabel(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
 function getGP(row: Row) {
   return num(row.games_played ?? row.gp ?? row.games);
 }
@@ -573,6 +578,7 @@ export default function LeaderboardClient() {
   const animationFrameRef = useRef<number | null>(null);
   const [stickyTop, setStickyTop] = useState(0);
   const [maxScrollLeft, setMaxScrollLeft] = useState(0);
+  const [isCompactCharts, setIsCompactCharts] = useState(false);
   const deferredQuery = useDeferredValue(q);
   const collator = useMemo(
     () =>
@@ -612,6 +618,14 @@ export default function LeaderboardClient() {
         }),
       );
   }, [division]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 640px)");
+    const updateCompactCharts = () => setIsCompactCharts(media.matches);
+    updateCompactCharts();
+    media.addEventListener("change", updateCompactCharts);
+    return () => media.removeEventListener("change", updateCompactCharts);
+  }, []);
 
   useEffect(() => {
     const nav = document.querySelector<HTMLElement>("[data-sticky-nav]");
@@ -868,6 +882,14 @@ export default function LeaderboardClient() {
         player_id: row.player_id,
       })),
     [primaryChartConfig.valueKey, tableRows],
+  );
+  const topChartData = useMemo(
+    () =>
+      (isCompactCharts ? top10.slice(0, 7) : top10).map((entry) => ({
+        ...entry,
+        displayName: truncateLabel(entry.name, isCompactCharts ? 12 : 24),
+      })),
+    [isCompactCharts, top10],
   );
 
   const dynamicScatterConfig =
@@ -1394,9 +1416,9 @@ export default function LeaderboardClient() {
           </div>
         </div>
 
-        <div className="mb-6 grid gap-6 xl:grid-cols-2">
+        <div className="mb-6 grid gap-4 xl:grid-cols-2">
           <div className="rounded-[28px] border border-sky-400/20 bg-slate-950/65 p-5 shadow-[0_20px_60px_rgba(8,15,29,0.45)] backdrop-blur">
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="font-semibold text-white">
                 {sortKey === "division" ? "Top 10 Scoring Rate" : primaryChartConfig.title}
               </h2>
@@ -1404,18 +1426,27 @@ export default function LeaderboardClient() {
                 {sortKey === "division" ? "PPG" : primaryChartConfig.metricLabel}
               </span>
             </div>
-            <div style={{ width: "100%", height: 320 }}>
+            <div style={{ width: "100%", height: isCompactCharts ? 260 : 320 }}>
               <ResponsiveContainer>
-                <BarChart data={top10} layout="vertical" margin={{ left: 10, right: 10 }}>
+                <BarChart
+                  data={topChartData}
+                  layout="vertical"
+                  margin={{ left: 6, right: 8, top: 4, bottom: 4 }}
+                >
                   <CartesianGrid stroke={gridStroke} horizontal={false} />
                   <XAxis type="number" tick={axisTickStyle} />
-                  <YAxis type="category" dataKey="name" width={160} tick={axisTickStyle} />
+                  <YAxis
+                    type="category"
+                    dataKey="displayName"
+                    width={isCompactCharts ? 88 : 160}
+                    tick={axisTickStyle}
+                  />
                   <Tooltip
                     cursor={{ fill: "rgba(56, 189, 248, 0.08)" }}
                     content={<ChartTooltip />}
                   />
                   <Bar dataKey="value" radius={[0, 12, 12, 0]}>
-                    {top10.map((entry, index) => (
+                    {topChartData.map((entry, index) => (
                       <Cell
                         key={`${entry.player_id}-${entry.name}`}
                         fill={chartPalette[index % chartPalette.length]}
@@ -1431,9 +1462,9 @@ export default function LeaderboardClient() {
           </div>
 
           <div className="rounded-[28px] border border-cyan-400/20 bg-slate-950/65 p-5 shadow-[0_20px_60px_rgba(8,15,29,0.45)] backdrop-blur">
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="font-semibold text-white">{dynamicScatterConfig.title}</h2>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs uppercase tracking-[0.2em] text-cyan-200/80">
                   {dynamicScatterConfig.badge}
                 </span>
@@ -1525,7 +1556,7 @@ export default function LeaderboardClient() {
               ref={dynamicScatterRef}
               style={{
                 width: "100%",
-                height: 320,
+                height: isCompactCharts ? 260 : 320,
                 touchAction: "none",
                 overscrollBehavior: "contain",
               }}
@@ -1567,7 +1598,7 @@ export default function LeaderboardClient() {
                       formatAxisTick(Number(value), dynamicScatterConfig.xKey)
                     }
                     tick={axisTickStyle}
-                    tickCount={6}
+                    tickCount={isCompactCharts ? 4 : 6}
                     stroke="rgba(125, 211, 252, 0.45)"
                   />
                   <YAxis
@@ -1580,10 +1611,15 @@ export default function LeaderboardClient() {
                       formatAxisTick(Number(value), dynamicScatterConfig.yKey)
                     }
                     tick={axisTickStyle}
-                    tickCount={6}
+                    tickCount={isCompactCharts ? 4 : 6}
                     stroke="rgba(34, 211, 238, 0.45)"
                   />
-                  <ZAxis type="number" dataKey="gp" range={[40, 240]} name="GP" />
+                  <ZAxis
+                    type="number"
+                    dataKey="gp"
+                    range={isCompactCharts ? [28, 140] : [40, 240]}
+                    name="GP"
+                  />
                   <Tooltip
                     cursor={{ strokeDasharray: "4 4", stroke: "rgba(96, 165, 250, 0.55)" }}
                     content={<ChartTooltip showPointName />}
@@ -1624,17 +1660,17 @@ export default function LeaderboardClient() {
           </div>
         </div>
 
-        <div className="mb-6 grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+        <div className="mb-6 grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
           <div className="grid gap-6">
             <div className="rounded-[28px] border border-violet-400/20 bg-slate-950/65 p-5 shadow-[0_20px_60px_rgba(8,15,29,0.45)] backdrop-blur">
-              <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="font-semibold text-white">Relationship Explorer</h2>
                   <p className="text-sm text-slate-400">
                     Compare any three metrics with X, Y, and bubble size controls.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                   className="rounded-lg border border-zinc-700 bg-zinc-950/50 px-2 py-1 text-xs text-white transition hover:border-zinc-500 hover:bg-zinc-900"
@@ -1771,7 +1807,7 @@ export default function LeaderboardClient() {
                 ref={explorerScatterRef}
                 style={{
                   width: "100%",
-                  height: 340,
+                  height: isCompactCharts ? 280 : 340,
                   touchAction: "none",
                   overscrollBehavior: "contain",
                 }}
@@ -1813,7 +1849,7 @@ export default function LeaderboardClient() {
                         formatAxisTick(Number(value), xMetric)
                       }
                       tick={axisTickStyle}
-                      tickCount={6}
+                      tickCount={isCompactCharts ? 4 : 6}
                       stroke="rgba(139, 92, 246, 0.45)"
                     />
                     <YAxis
@@ -1826,7 +1862,7 @@ export default function LeaderboardClient() {
                         formatAxisTick(Number(value), yMetric)
                       }
                       tick={axisTickStyle}
-                      tickCount={6}
+                      tickCount={isCompactCharts ? 4 : 6}
                       stroke="rgba(56, 189, 248, 0.45)"
                     />
                     <ZAxis
@@ -1835,7 +1871,13 @@ export default function LeaderboardClient() {
                       name={
                         zMetric === "none" ? "Bubble Size (Fixed)" : explorerMetricLabel(zMetric)
                       }
-                      range={zMetric === "none" ? [140, 140] : [60, 260]}
+                      range={
+                        zMetric === "none"
+                          ? [isCompactCharts ? 100 : 140, isCompactCharts ? 100 : 140]
+                          : isCompactCharts
+                            ? [36, 160]
+                            : [60, 260]
+                      }
                     />
                     <Tooltip content={<ChartTooltip showPointName />} />
                     <Scatter
@@ -1878,15 +1920,15 @@ export default function LeaderboardClient() {
                   Points Source
                 </span>
               </div>
-              <div style={{ width: "100%", height: 260 }}>
+              <div style={{ width: "100%", height: isCompactCharts ? 220 : 260 }}>
                 <ResponsiveContainer>
                   <PieChart>
                     <Pie
                       data={shotMix}
                       dataKey="value"
                       nameKey="name"
-                      innerRadius={60}
-                      outerRadius={94}
+                      innerRadius={isCompactCharts ? 44 : 60}
+                      outerRadius={isCompactCharts ? 74 : 94}
                       paddingAngle={3}
                     >
                       {shotMix.map((segment, index) => (
@@ -1984,11 +2026,15 @@ export default function LeaderboardClient() {
                 </colgroup>
                 <thead className="bg-zinc-950/95">
                   <tr>
-                    {columns.map((column) => (
+                    {columns.map((column, index) => (
                       <th
                         key={`sticky-header-${column.key}`}
                         className={`p-3 font-medium ${
                           column.align === "left" ? "text-left" : "text-right"
+                        } ${
+                          index === 0
+                            ? "sticky left-0 z-20 bg-zinc-950/98 shadow-[6px_0_16px_rgba(2,6,23,0.45)]"
+                            : ""
                         }`}
                       >
                         {column.label}
@@ -2026,7 +2072,7 @@ export default function LeaderboardClient() {
                     key={row.player_id}
                     className="border-t border-zinc-800 transition hover:bg-zinc-800/40"
                   >
-                    <td className="p-3 font-medium text-left">
+                    <td className="sticky left-0 z-10 bg-slate-950/96 p-3 font-medium text-left shadow-[6px_0_16px_rgba(2,6,23,0.45)]">
                       <Link
                         className="hover:underline"
                         href={withDivision(`/players/${row.player_id}`, division)}
