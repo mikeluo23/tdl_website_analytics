@@ -2901,6 +2901,47 @@ def get_game(game_id: int):
 
 @app.get("/games/{game_id}/boxscore")
 def game_boxscore(game_id: int):
+    if postgres_analytics_enabled():
+        sql = """
+        SELECT
+          t.team_name,
+          p.player_name,
+          pgs.pts,
+          pgs.reb,
+          pgs.ast,
+          pgs.stl,
+          pgs.blk,
+          pgs.tov,
+          pgs.fouls,
+          pgs.fgm,
+          pgs.fga,
+          pgs.fg_pct,
+          pgs.tpm,
+          pgs.tpa,
+          pgs.tp_pct,
+          pgs.ftm,
+          pgs.fta,
+          pgs.ft_pct
+        FROM player_game_stats pgs
+        JOIN players p ON p.player_id = pgs.player_id
+        JOIN teams t ON t.team_id = pgs.team_id
+        WHERE pgs.game_id = %s
+        ORDER BY t.team_name, pgs.pts DESC, p.player_name
+        """
+        try:
+            with get_postgres_conn() as conn, conn.cursor() as cur:
+                cur.execute(sql, (game_id,))
+                rows = cur.fetchall()
+                if not rows:
+                    cur.execute("SELECT 1 FROM games WHERE game_id = %s", (game_id,))
+                    if cur.fetchone() is None:
+                        raise HTTPException(status_code=404, detail="game not found")
+                return rows
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if csv_enabled():
         store = get_csv_store()
         game_ids = {row["game_id"] for row in store["games"]}
@@ -2933,34 +2974,36 @@ def game_boxscore(game_id: int):
             raise HTTPException(status_code=404, detail="game not found")
         return rows
 
-    sql = """
-    SELECT
-      t.team_name,
-      p.player_name,
-      pgs.pts,
-      pgs.reb,
-      pgs.ast,
-      pgs.stl,
-      pgs.blk,
-      pgs.tov,
-      pgs.fouls,
-      pgs.fgm,
-      pgs.fga,
-      pgs.fg_pct,
-      pgs.tpm,
-      pgs.tpa,
-      pgs.tp_pct,
-      pgs.ftm,
-      pgs.fta,
-      pgs.ft_pct
-    FROM player_game_stats pgs
-    JOIN players p ON p.player_id = pgs.player_id
-    JOIN teams t ON t.team_id = pgs.team_id
-    WHERE pgs.game_id = %s
-    ORDER BY t.team_name, pgs.pts DESC, p.player_name
-    """
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(sql, (game_id,))
+        cur.execute(
+            """
+            SELECT
+              t.team_name,
+              p.player_name,
+              pgs.pts,
+              pgs.reb,
+              pgs.ast,
+              pgs.stl,
+              pgs.blk,
+              pgs.tov,
+              pgs.fouls,
+              pgs.fgm,
+              pgs.fga,
+              pgs.fg_pct,
+              pgs.tpm,
+              pgs.tpa,
+              pgs.tp_pct,
+              pgs.ftm,
+              pgs.fta,
+              pgs.ft_pct
+            FROM player_game_stats pgs
+            JOIN players p ON p.player_id = pgs.player_id
+            JOIN teams t ON t.team_id = pgs.team_id
+            WHERE pgs.game_id = %s
+            ORDER BY t.team_name, pgs.pts DESC, p.player_name
+            """,
+            (game_id,),
+        )
         rows = cur.fetchall()
         if not rows:
             cur.execute("SELECT 1 FROM d3_games WHERE id = %s", (game_id,))
